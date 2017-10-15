@@ -37,10 +37,10 @@ struct W2S_Packet
 
 /////////////////////////////////////////////////////////////////////////
 
-constexpr size_t W2S_BUFFER_SIZE = 13000;
+constexpr size_t W2S_BUFFER_SIZE = 130;
 alignas(uint32_t) uint8_t s_w2s_buffer[W2S_BUFFER_SIZE];
 
-constexpr size_t S2W_BUFFER_SIZE = 13000;
+constexpr size_t S2W_BUFFER_SIZE = 130;
 alignas(uint32_t) uint8_t s_s2w_buffer[S2W_BUFFER_SIZE];
 
 
