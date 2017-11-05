@@ -9,6 +9,7 @@
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 #include "esp_wifi_internal.h"
+#include "esp_heap_caps.h"
 #include "wifi_raw.h"
 #include "fec_codec.h"
 
@@ -18,21 +19,21 @@ static int s_stats_last_tp = 0;
 
 static constexpr uint8_t s_rate_mapping[31] = 
 { 
-    0, //0  - B 1M   CCK
-    1, //1  - B 2M   CCK
-    5, //2  - B 2M   CCK Short Preamble
-    2, //3  - B 5.5M CCK
-    6, //4  - B 5.5M CCK Short Preamble
-    3, //5  - B 11M  CCK
-    7, //6  - B 11M  CCK Short Preamble
+    0,  //0  - B 1M   DSSS
+    1,  //1  - B 2M   DSSS
+    5,  //2  - B 2M   DSSS Short Preamble
+    2,  //3  - B 5.5M DSSS
+    6,  //4  - B 5.5M DSSS Short Preamble
+    3,  //5  - B 11M  DSSS
+    7,  //6  - B 11M  DSSS Short Preamble
 
     11, //7  - G 6M   ODFM
     15, //8  - G 9M   ODFM
     10, //9  - G 12M  ODFM
     14, //10 - G 18M  ODFM
-    9, //11 - G 24M  ODFM
+    9,  //11 - G 24M  ODFM
     13, //12 - G 36M  ODFM
-    8, //13 - G 48M  ODFM
+    8,  //13 - G 48M  ODFM
     12, //14 - G 54M  ODFM
 
     16, //15 - N 6.5M  MCS0
@@ -53,10 +54,10 @@ static constexpr uint8_t s_rate_mapping[31] =
     31, //30 - N 72M   MCS7 Short Guard Interval
 };
 
-static constexpr gpio_num_t GPIO_MOSI = gpio_num_t(12);
-static constexpr gpio_num_t GPIO_MISO = gpio_num_t(13);
-static constexpr gpio_num_t GPIO_SCLK = gpio_num_t(15);
-static constexpr gpio_num_t GPIO_CS = gpio_num_t(14);
+static constexpr gpio_num_t GPIO_MOSI = gpio_num_t(13);
+static constexpr gpio_num_t GPIO_MISO = gpio_num_t(12);
+static constexpr gpio_num_t GPIO_SCLK = gpio_num_t(14);
+static constexpr gpio_num_t GPIO_CS = gpio_num_t(15);
 
 
 /////////////////////////////////////////////////////////////////////////
@@ -255,7 +256,7 @@ void packet_sent_cb(uint8_t status)
                 //int dt = micros() - s_send_start_time;
                 //s_send_max_time = std::max(s_send_max_time, dt);
                 //s_send_min_time = std::min(s_send_min_time, dt);
-                s_stats.wlan_data_sent += s_wlan_packet.size + HEADER_SIZE;
+                s_stats.wlan_data_sent += s_wlan_packet.size + WLAN_HEADER_SIZE;
             }
             else
             {
@@ -357,7 +358,7 @@ void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 
 /////////////////////////////////////////////////////////////////////////
 
-uint8_t s_uart_buffer[MAX_PAYLOAD_SIZE];
+uint8_t s_uart_buffer[MAX_WLAN_PAYLOAD_SIZE];
 size_t s_uart_offset = 0;
 
 void parse_command()
@@ -422,10 +423,10 @@ void parse_command()
             }
             else
             {
-                if (s_uart_offset >= MAX_PAYLOAD_SIZE)
+                if (s_uart_offset >= MAX_WLAN_PAYLOAD_SIZE)
                 {
                     while (available-- > 0) Serial.read();
-                    LOG("Packet too big: %d > %d\n", s_uart_offset + 1, MAX_PAYLOAD_SIZE);
+                    LOG("Packet too big: %d > %d\n", s_uart_offset + 1, MAX_WLAN_PAYLOAD_SIZE);
 
                     s_uart_command = 0;
                     s_uart_offset = 0;
@@ -631,49 +632,123 @@ void spi_on_data_sent()
   }
 */}
 
-void spi_on_status_received(uint32_t status)
+
+/////////////////////////////////////////////////////////////////////////
+
+constexpr size_t MAX_SPI_BUFFER_SIZE = MAX_WLAN_PACKET_SIZE + 8;
+uint8_t* s_spi_tx_buffer = nullptr;
+uint8_t* s_spi_rx_buffer = nullptr;
+uint8_t* s_spi_rx_payload_ptr = nullptr;
+int s_spi_transaction_id = 0;
+
+void spi_post_setup_cb(spi_slave_transaction_t* trans)
 {
-    lock_guard lg;
+//    LOG("SPI armed %d: %d\n", (int)trans->user, trans->length / 8);
+}
+
+void spi_post_trans_cb(spi_slave_transaction_t* trans)
+{
+//    LOG("SPI done %d: %d / %d\n", (int)trans->user, trans->length / 8, trans->trans_len / 8);
+}
+
+esp_err_t init_spi()
+{
+    s_spi_tx_buffer = (uint8_t*)heap_caps_malloc(MAX_SPI_BUFFER_SIZE, MALLOC_CAP_DMA);
+    if (!s_spi_tx_buffer)
+    {
+      return ESP_ERR_NO_MEM;
+    }
+    s_spi_rx_buffer = (uint8_t*)heap_caps_malloc(MAX_SPI_BUFFER_SIZE, MALLOC_CAP_DMA);
+    if (!s_spi_rx_buffer)
+    {
+      return ESP_ERR_NO_MEM;
+    }
+  
+    //Enable pull-ups on SPI lines so we don't detect rogue pulses when no master is connected.
+    gpio_set_pull_mode(GPIO_MOSI, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
+    
+    
+    //Configuration for the SPI bus
+    spi_bus_config_t bus_config;
+    memset(&bus_config, 0, sizeof(bus_config));
+    bus_config.mosi_io_num = GPIO_MOSI;
+    bus_config.miso_io_num = GPIO_MISO;
+    bus_config.sclk_io_num = GPIO_SCLK;
+    bus_config.quadwp_io_num = -1;
+    bus_config.quadhd_io_num = -1;
+    bus_config.max_transfer_sz = MAX_SPI_BUFFER_SIZE * 8;
+    
+    //Configuration for the SPI slave interface
+    spi_slave_interface_config_t slave_config;
+    slave_config.mode = 0;
+    slave_config.spics_io_num = GPIO_CS;
+    slave_config.queue_size = 2;
+    slave_config.flags = 0;
+    slave_config.post_setup_cb = spi_post_setup_cb;
+    slave_config.post_trans_cb = spi_post_trans_cb;
+    
+    return spi_slave_initialize(VSPI_HOST, &bus_config, &slave_config, 1);
+}
+
+
+void setup_spi_idle_transfer()
+{
+    //LOG("ARM SPI idle transfer\n");
+
+    static spi_slave_transaction_t t;
+    memset(&t, 0, sizeof(t));
+    *reinterpret_cast<uint32_t*>(s_spi_tx_buffer) = 0xABCD;
+    t.length = MAX_SPI_BUFFER_SIZE * 8;
+    t.tx_buffer = s_spi_tx_buffer;
+    t.rx_buffer = s_spi_rx_buffer;
+    //t.user = (void*)s_spi_transaction_id++;
+    esp_err_t err = spi_slave_queue_trans(VSPI_HOST, &t, 0);
+    ESP_ERROR_CHECK(err);
+}
+
+void process_spi_transaction(spi_slave_transaction_t* trans)
+{
+    //LOG("SPI done %d: %d / %d\n", (int)trans->user, trans->length / 8, trans->trans_len / 8);
+
+    size_t transfer_size = trans->trans_len / 8;
+    if (transfer_size < 4)
+    {
+      LOG("SPI error: transfer too small: %d\n", transfer_size);
+      setup_spi_idle_transfer();
+      return;
+    }
+
+    size_t payload_size = transfer_size - 4;
+
+    //lock_guard lg;
+
+    uint32_t status = *reinterpret_cast<uint32_t*>(s_spi_rx_buffer);
 
     //  Serial.printf("spi status received sent: %d\n", status);
     SPI_Command command = (SPI_Command)(status >> 24);
     if (command == SPI_Command::SPI_CMD_SEND_PACKET)
     {
         uint32_t size = status & 0xFFFF;
-        if (size > MAX_PAYLOAD_SIZE)
+        if (size > MAX_WLAN_PAYLOAD_SIZE || size != payload_size)
         {
             s_stats.spi_error_count++;
-            LOG("Packet too big: %d\n", size);
+            //LOG("Packet too big: %d\n", size);
         }
         else
         {
-            if (!s_spi_incoming_packet.ptr)
-            {
-                start_writing_s2w_packet(s_spi_incoming_packet, size);
-                //xxx s_spi_incoming_packet = s_wlan_free_queue.pop();
-                if (!s_spi_incoming_packet.ptr)
-                {
-                    s_stats.spi_error_count++;
-                    s_stats.spi_received_packets_dropped++;
-                    //Serial.printf("Not ready to send\n");
-                }
-            }
+            LOG("Received spi packet: %d\n", size);
         }
+        setup_spi_idle_transfer();
         return;
-    }
-    else
-    {
-        if (s_spi_outgoing_packet.ptr)
-        {
-            LOG("SPI outgoing packet interrupted by %d, offset %d, size %d\n", command, s_spi_outgoing_packet.offset, s_spi_outgoing_packet.size);
-            cancel_reading_w2s_packet(s_spi_outgoing_packet);
-            //xxx s_spi_free_queue.push_and_clear(s_spi_outgoing_packet); //cancel the outgoing one
-        }
     }
 
     if (command == SPI_Command::SPI_CMD_GET_PACKET)
     {
-        if (!s_spi_outgoing_packet.ptr)
+        LOG("Get SPI packet\n");
+
+/*        if (!s_spi_outgoing_packet.ptr)
         {
             start_reading_w2s_packet(s_spi_outgoing_packet);
             //xxx s_spi_outgoing_packet = s_spi_to_send_queue.pop();
@@ -704,16 +779,9 @@ void spi_on_status_received(uint32_t status)
         {
             //      spi_slave_set_status(0);
         }
+*/
+        setup_spi_idle_transfer();
         return;
-    }
-    else
-    {
-        if (s_spi_incoming_packet.ptr)
-        {
-            LOG("SPI incoming packet interrupted by %d\n", command);
-            cancel_writing_s2w_packet(s_spi_incoming_packet);
-            //xxx s_wlan_free_queue.push_and_clear(s_spi_incoming_packet); //cancel the incoming one
-        }
     }
 
     if (command == SPI_Command::SPI_CMD_SET_RATE)
@@ -728,6 +796,7 @@ void spi_on_status_received(uint32_t status)
 */  }
     else if (command == SPI_Command::SPI_CMD_GET_RATE)
     {
+        LOG("Get rate\n");
         uint8_t enable_mask = 0;
         uint8_t rate = 0;
         /*    if (wifi_get_user_fixed_rate(&enable_mask, &rate) == 0)
@@ -765,6 +834,7 @@ void spi_on_status_received(uint32_t status)
 */  }
     else if (command == SPI_Command::SPI_CMD_GET_CHANNEL)
     {
+      LOG("Get channel\n");
         //    uint8_t channel = wifi_get_channel();
         //    spi_slave_set_status((SPI_Command::SPI_CMD_GET_CHANNEL << 24) | channel);
     }
@@ -777,12 +847,14 @@ void spi_on_status_received(uint32_t status)
     }
     else if (command == SPI_Command::SPI_CMD_GET_POWER)
     {
+        LOG("Get power\n");
         float dBm = get_wlan_power_dBm();
         uint16_t power = static_cast<uint16_t>(std::max(std::min((dBm * 100.f), 32767.f), -32767.f) + 32767.f);
         //    spi_slave_set_status((SPI_Command::SPI_CMD_GET_POWER << 24) | power);
     }
     else if (command == SPI_Command::SPI_CMD_GET_STATS)
     {
+        LOG("Get stats\n");
         uint32_t data[8] = { 0 };
         memcpy(data, &s_stats, sizeof(Stats));
         //    spi_slave_set_data(data);
@@ -791,26 +863,10 @@ void spi_on_status_received(uint32_t status)
     {
         LOG("Unknown command: %d\n", command);
     }
+
+      setup_spi_idle_transfer();
+    
     //s_stats.spi_status_received++;
-}
-
-void spi_on_status_sent(uint32_t status)
-{
-    lock_guard lg;
-    //LOG("Status sent: %d\n", status);
-    //  spi_slave_set_status(0);
-}
-
-/////////////////////////////////////////////////////////////////////////
-
-void spi_post_setup_cb(spi_slave_transaction_t* trans)
-{
-    LOG("SPI initialized\n");
-}
-
-void spi_post_trans_cb(spi_slave_transaction_t* trans)
-{
-    LOG("SPI transfer done\n");
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -832,7 +888,7 @@ void setup()
 
     Serial.printf("Initializing...\n");
 
-    Fec_Codec::Descriptor descriptor;
+/*    Fec_Codec::Descriptor descriptor;
     descriptor.mtu = 1400;
     //descriptor.encoder_core = Fec_Codec::Core::Core_1;
     //descriptor.decoder_core = Fec_Codec::Core::Core_1;
@@ -870,7 +926,7 @@ void setup()
     }
     test_fec_encoding();
     test_fec_decoding();
-
+*/
     bool ok = false;
 
     ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
@@ -881,30 +937,9 @@ void setup()
     ESP_ERROR_CHECK(esp_wifi_set_mode(ESP_WIFI_MODE));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    {
-        //Enable pull-ups on SPI lines so we don't detect rogue pulses when no master is connected.
-        gpio_set_pull_mode(GPIO_MOSI, GPIO_PULLUP_ONLY);
-        gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
-        gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
+    ESP_ERROR_CHECK(init_spi());
 
-
-        //Configuration for the SPI bus
-        spi_bus_config_t bus_config;
-        bus_config.mosi_io_num = GPIO_MOSI;
-        bus_config.miso_io_num = GPIO_MISO;
-        bus_config.sclk_io_num = GPIO_SCLK;
-
-        //Configuration for the SPI slave interface
-        spi_slave_interface_config_t slave_config;
-        slave_config.mode = 0;
-        slave_config.spics_io_num = GPIO_CS;
-        slave_config.queue_size = 2;
-        slave_config.flags = 0;
-        slave_config.post_setup_cb = spi_post_setup_cb;
-        slave_config.post_trans_cb = spi_post_trans_cb;
-
-        ESP_ERROR_CHECK(spi_slave_initialize(HSPI_HOST, &bus_config, &slave_config, 1));
-    }
+    setup_spi_idle_transfer();
 
     //ESP_ERROR_CHECK( esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, 0) );
 
@@ -913,7 +948,7 @@ void setup()
 
     set_wlan_power_dBm(20.5f);
 
-    esp_log_level_set("*", ESP_LOG_NONE);
+    //esp_log_level_set("*", ESP_LOG_NONE);
 
     set_wifi_fixed_rate(31);
 
@@ -941,8 +976,8 @@ void loop()
 
         if (p.ptr)
         {
-            memcpy(p.ptr, s_packet_header, HEADER_SIZE);
-            esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, p.ptr, HEADER_SIZE + p.size, false);
+            memcpy(p.ptr, s_wlan_packet_header, WLAN_HEADER_SIZE);
+            esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, p.ptr, WLAN_HEADER_SIZE + p.size, false);
             if (res == ESP_OK)
             {
                 s_stats.wlan_data_sent += s_wlan_packet.size;
@@ -962,6 +997,25 @@ void loop()
     }
 
     update_status_led();
+
+    {
+        spi_slave_transaction_t* qt = nullptr;
+        esp_err_t err = spi_slave_get_trans_result(VSPI_HOST, &qt, portMAX_DELAY);
+        ESP_ERROR_CHECK(err);
+
+        if (qt)
+        {
+            process_spi_transaction(qt);
+
+            //char xxx[128];
+            //memcpy(xxx, s_spi_rx_buf, qt->length / 8);
+            //xxx[qt->length / 8] = 0;
+            //static int xxx = 0;
+            //xxx++;
+            s_stats.spi_data_received += qt->length / 8;
+            //LOG("SPI confirmed %d: %d: %s\n", (int)qt->user, qt->length / 8, xxx);
+        }
+    }
 
     /*  if (s_wlan_packet.ptr)
   {

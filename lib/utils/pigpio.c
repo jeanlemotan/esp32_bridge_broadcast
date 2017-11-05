@@ -4433,17 +4433,17 @@ static void spiGoS(
 
    spiReg[SPI_CLK] = 250000000/speed;
 
-   int fifoPrefill = 64;
-  while((txCnt < cnt) && ((spiReg[SPI_CS] & SPI_CS_TXD)) && --fifoPrefill > 0)
-  {
-     if (txBuf) spiReg[SPI_FIFO] = txBuf[txCnt];
-     else       spiReg[SPI_FIFO] = 0;
-     txCnt++;
-  }
+   cnt = cnt4w;
+
+//  int fifoPrefill = 64;
+//  while((txCnt < cnt) && ((spiReg[SPI_CS] & SPI_CS_TXD)) && --fifoPrefill > 0)
+//  {
+//     if (txBuf) spiReg[SPI_FIFO] = txBuf[txCnt];
+//     else       spiReg[SPI_FIFO] = 0;
+//     txCnt++;
+//  }
 
    spiReg[SPI_CS] = spiDefaults | SPI_CS_TA; /* start */
-
-   cnt = cnt4w;
 
    while((txCnt < cnt) || (rxCnt < cnt))
    {

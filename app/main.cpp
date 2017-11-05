@@ -57,21 +57,37 @@ void show_help()
     std::cout << "\t--spi-speed 8000000 \tUse the specified SPI speed (Hz)\n";
     std::cout << "\t--spi-delay 20\tUse the specified delay in microseconds for SPI transactions\n";
     std::cout << "\t--phy-rate X\tThe PHY rate index, out of these values:\n";
-    std::cout << "\t\t0:  802.11b 1Mbps, CCK modulation\n";
-    std::cout << "\t\t1:  802.11b 2Mbps, CCK modulation\n";
-    std::cout << "\t\t2:  802.11b 2Mbps, Short Preamble, CCK modulation\n";
-    std::cout << "\t\t3:  802.11b 5.5Mbps, CCK modulation\n";
-    std::cout << "\t\t4:  802.11b 5.5Mbps, Short Preamble, CCK modulation\n";
-    std::cout << "\t\t5:  802.11b 11Mbps, CCK modulation\n";
-    std::cout << "\t\t6:  802.11b 11Mbps, Short Preamble, CCK modulation\n";
-    std::cout << "\t\t7:  802.11g 6Mbps, ODFM modulation\n";
-    std::cout << "\t\t8:  802.11g 9Mbps, ODFM modulation\n";
-    std::cout << "\t\t9:  802.11g 12Mbps, ODFM modulation\n";
-    std::cout << "\t\t10: 802.11g 18Mbps, ODFM modulation\n";
-    std::cout << "\t\t11: 802.11g 24Mbps, ODFM modulation\n";
-    std::cout << "\t\t12: 802.11g 36Mbps, ODFM modulation\n";
-    std::cout << "\t\t13: 802.11g 48Mbps, ODFM modulation\n";
-    std::cout << "\t\t14: 802.11g 56Mbps, ODFM modulation\n";
+    std::cout << "\t\t0:  802.11b 1Mbps, CCK\n";
+    std::cout << "\t\t1:  802.11b 2Mbps, CCK\n";
+    std::cout << "\t\t2:  802.11b 2Mbps, CCK, Short Preamble\n";
+    std::cout << "\t\t3:  802.11b 5.5Mbps, CCK\n";
+    std::cout << "\t\t4:  802.11b 5.5Mbps, CCK, Short Preamble\n";
+    std::cout << "\t\t5:  802.11b 11Mbps, CCK\n";
+    std::cout << "\t\t6:  802.11b 11Mbps, CCK, Short Preamble\n";
+    std::cout << "\t\t7:  802.11g 6Mbps, ODFM\n";
+    std::cout << "\t\t8:  802.11g 9Mbps, ODFM\n";
+    std::cout << "\t\t9:  802.11g 12Mbps, ODFM\n";
+    std::cout << "\t\t10: 802.11g 18Mbps, ODFM\n";
+    std::cout << "\t\t11: 802.11g 24Mbps, ODFM\n";
+    std::cout << "\t\t12: 802.11g 36Mbps, ODFM\n";
+    std::cout << "\t\t13: 802.11g 48Mbps, ODFM\n";
+    std::cout << "\t\t14: 802.11g 56Mbps, ODFM\n";
+    std::cout << "\t\t15: 802.11n 6.5Mbps, MCS0\n";
+    std::cout << "\t\t16: 802.11n 7.2Mbps, MCS0, Short Guart Interval\n";
+    std::cout << "\t\t17: 802.11n 13Mbps, MCS1\n";
+    std::cout << "\t\t18: 802.11n 14.4Mbps, MCS1, Short Guart Interval\n";
+    std::cout << "\t\t19: 802.11n 19.5Mbps, MCS2\n";
+    std::cout << "\t\t20: 802.11n 21.7Mbps, MCS2, Short Guart Interval\n";
+    std::cout << "\t\t21: 802.11n 26Mbps, MCS3\n";
+    std::cout << "\t\t22: 802.11n 28.9Mbps, MCS3, Short Guart Interval\n";
+    std::cout << "\t\t23: 802.11n 39Mbps, MCS4\n";
+    std::cout << "\t\t24: 802.11n 43.3Mbps, MCS4, Short Guart Interval\n";
+    std::cout << "\t\t25: 802.11n 52Mbps, MCS5\n";
+    std::cout << "\t\t26: 802.11n 57.8Mbps, MCS5, Short Guart Interval\n";
+    std::cout << "\t\t27: 802.11n 58Mbps, MCS6\n";
+    std::cout << "\t\t28: 802.11n 65Mbps, MCS6, Short Guart Interval\n";
+    std::cout << "\t\t29: 802.11n 65Mbps, MCS7\n";
+    std::cout << "\t\t30: 802.11n 72Mbps, MCS7, Short Guart Interval\n";
     std::cout << "\t--phy-power X\tThe PHY power in dBm between 0dBm to 20.5dBm\n";
     std::cout << "\t--phy-channel X\tThe PHY channel between 1 and 11\n";
 }
@@ -517,6 +533,8 @@ int main(int argc, const char* argv[])
             return -1;
         }
     }
+
+    phy.process();
 
     phy.set_rate(s_phy_rate);
     phy.set_power(s_phy_power);

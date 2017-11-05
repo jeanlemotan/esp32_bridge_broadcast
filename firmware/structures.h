@@ -2,7 +2,7 @@
 
 #include <cassert>
 
-constexpr uint8_t s_packet_header[] =
+constexpr uint8_t s_wlan_packet_header[] =
 {
     0x08, 0x01, 0x00, 0x00,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -11,13 +11,11 @@ constexpr uint8_t s_packet_header[] =
     0x10, 0x86
 };
 
-constexpr size_t CHUNK_SIZE = 64;
-constexpr size_t CHUNK_MASK = (CHUNK_SIZE - 1);
+constexpr size_t WLAN_HEADER_SIZE = sizeof(s_wlan_packet_header);
+constexpr size_t MAX_WLAN_PACKET_SIZE = 1400;
+constexpr size_t MAX_WLAN_PAYLOAD_SIZE = MAX_WLAN_PACKET_SIZE - WLAN_HEADER_SIZE;
 
-constexpr size_t HEADER_SIZE = sizeof(s_packet_header);
-constexpr size_t MAX_PAYLOAD_SIZE = 1400 - HEADER_SIZE;
-
-static_assert(HEADER_SIZE == 24, "");
+static_assert(WLAN_HEADER_SIZE == 24, "");
 
 struct S2W_Packet
 {
@@ -184,7 +182,7 @@ Queue<S2W_BUFFER_SIZE> s_s2w_queue(s_s2w_buffer);
 
 bool start_writing_s2w_packet(S2W_Packet& packet, size_t size)
 {
-  size_t real_size = HEADER_SIZE + size;
+  size_t real_size = WLAN_HEADER_SIZE + size;
   uint8_t* buffer = s_s2w_queue.start_writing(real_size);
   if (!buffer)
   {
@@ -194,7 +192,7 @@ bool start_writing_s2w_packet(S2W_Packet& packet, size_t size)
   packet.offset = 0;
   packet.size = size;
   packet.ptr = buffer;
-  packet.payload_ptr = buffer + HEADER_SIZE;
+  packet.payload_ptr = buffer + WLAN_HEADER_SIZE;
   return true;
 }
 void end_writing_s2w_packet(S2W_Packet& packet)
@@ -218,9 +216,9 @@ bool start_reading_s2w_packet(S2W_Packet& packet)
     return false;
   }
   packet.offset = 0;
-  packet.size = real_size - HEADER_SIZE;
+  packet.size = real_size - WLAN_HEADER_SIZE;
   packet.ptr = buffer;
-  packet.payload_ptr = buffer + HEADER_SIZE;
+  packet.payload_ptr = buffer + WLAN_HEADER_SIZE;
   return true;
 }
 void end_reading_s2w_packet(S2W_Packet& packet)

@@ -95,7 +95,7 @@ Phy::Init_Result Phy::init_pigpio(size_t port, size_t channel, size_t speed, siz
         return Init_Result::ALREADY_INITIALIZED;
     }
 
-    m_speed = speed;
+    m_speed = 10000000;//speed;
     m_comms_delay = comms_delay;
 
     if (port > 1)
@@ -143,6 +143,8 @@ Phy::Init_Result Phy::init_dev(const char* device, size_t speed, size_t comms_de
         std::cerr << "Already initialized\n";
         return Init_Result::ALREADY_INITIALIZED;
     }
+
+    speed = 10000000;
 
     if (speed == 0)
     {
@@ -231,7 +233,7 @@ bool Phy::transfer(void const* tx_data, void* rx_data, size_t size)
         m_spi_transfers[0].len = size;
         m_spi_transfers[0].speed_hz = m_speed;
         m_spi_transfers[0].bits_per_word = 8;
-        m_spi_transfers[0].delay_usecs = m_comms_delay;
+        m_spi_transfers[0].delay_usecs = 0;//m_comms_delay;
         m_spi_transfers[0].cs_change = 0;
 
         int status = ioctl(m_dev_fd, SPI_IOC_MESSAGE(1), &m_spi_transfers[0]);
@@ -587,38 +589,51 @@ bool Phy::get_stats(Stats& stats)
 
 void Phy::process()
 {
-//    std::chrono::high_resolution_clock::time_point start_tp = std::chrono::high_resolution_clock::now();
+    std::chrono::high_resolution_clock::time_point start_tp = std::chrono::high_resolution_clock::now();
 
-//    //set_status(0);
+    //set_status(0);
 
-//    std::array<uint8_t, MAX_PACKET_SIZE> payload = { 0 };
-//    for (size_t i = 0; i < MAX_PACKET_SIZE; i++)
-//    {
-//        payload[i] = ('A' + i % 26);
-//    }
+    std::array<uint8_t, 1404> tx_payload = { 0 };
+    std::array<uint8_t, 1404> rx_payload = { 0 };
+    for (size_t i = 0; i < tx_payload.size(); i++)
+    {
+        tx_payload[i] = ('A' + i % 26);
+    }
 
-//    size_t count = 0;
-//    while (true)
-//    {
-//        count++;
-//        send_data(payload.data(), payload.size());
-//        size_t size = 0;
-//        size_t rssi = 0;
-//        receive_data(payload.data(), size, rssi);
+    uint32_t command = (SPI_Command::SPI_CMD_SEND_PACKET << 24) | (33 + 2); //add the crc size
+    memcpy(tx_payload.data(), &command, 4);
 
-//        //gpioDelay(1000);
 
-//        //exit(1);
+    size_t count = 0;
+    while (true)
+    {
+        count++;
 
-//        if (std::chrono::high_resolution_clock::now() - start_tp >= std::chrono::milliseconds(1000))
-//        {
-//            start_tp = std::chrono::high_resolution_clock::now();
-//            std::cout << std::to_string(count) + "\n";
-//            std::flush(std::cout);
-//            std::flush(std::cerr);
-//            count = 0;
-//        }
-//    }
+        transfer(tx_payload.data(), rx_payload.data(), tx_payload.size());
+        uint32_t status = *(uint32_t*)rx_payload.data();
+        if (status == 0xABCD)
+        {
+            //std::cout << "OK \n";
+        }
+        else
+        {
+            std::cout << std::to_string(status) << " err\n";
+        }
+        std::flush(std::cout);
+
+        gpioDelay(100);
+
+        //exit(1);
+
+        if (std::chrono::high_resolution_clock::now() - start_tp >= std::chrono::milliseconds(1000))
+        {
+            start_tp = std::chrono::high_resolution_clock::now();
+            std::cout << std::to_string(count) + "\n";
+            std::flush(std::cout);
+            std::flush(std::cerr);
+            count = 0;
+        }
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////

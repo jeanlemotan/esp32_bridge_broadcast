@@ -32,22 +32,41 @@ public:
 
     enum class Rate
     {
-      RATE_B_1M_CCK,
-      RATE_B_2M_CCK,
-      RATE_B_2M_CCK_SHOST_PREAMBLE,
-      RATE_B_5_5M_CCK,
-      RATE_B_5_5M_CCK_SHOST_PREAMBLE,
-      RATE_B_11M_CCK,
-      RATE_B_11M_CCK_SHOST_PREAMBLE,
-      RATE_G_6M_ODFM,
-      RATE_G_9M_ODFM,
-      RATE_G_12M_ODFM,
-      RATE_G_18M_ODFM,
-      RATE_G_24M_ODFM,
-      RATE_G_36M_ODFM,
-      RATE_G_48M_ODFM,
-      RATE_G_54M_ODFM,
-      COUNT
+        RATE_B_1M_CCK,
+        RATE_B_2M_CCK,
+        RATE_B_2M_CCK_SHOST_PREAMBLE,
+        RATE_B_5_5M_CCK,
+        RATE_B_5_5M_CCK_SHOST_PREAMBLE,
+        RATE_B_11M_CCK,
+        RATE_B_11M_CCK_SHOST_PREAMBLE,
+
+        RATE_G_6M_ODFM,
+        RATE_G_9M_ODFM,
+        RATE_G_12M_ODFM,
+        RATE_G_18M_ODFM,
+        RATE_G_24M_ODFM,
+        RATE_G_36M_ODFM,
+        RATE_G_48M_ODFM,
+        RATE_G_54M_ODFM,
+
+        RATE_N_6_5M_MCS0,
+        RATE_N_7_2M_MCS0_SHORT_GI,
+        RATE_N_13M_MCS1,
+        RATE_N_14_4M_MCS1_SHORT_GI,
+        RATE_N_19_5M_MCS2,
+        RATE_N_21_7M_MCS2_SHORT_GI,
+        RATE_N_26M_MCS3,
+        RATE_N_28_9M_MCS3_SHORT_GI,
+        RATE_N_39M_MCS4,
+        RATE_N_43_3M_MCS4_SHORT_GI,
+        RATE_N_52M_MCS5,
+        RATE_N_57_8M_MCS5_SHORT_GI,
+        RATE_N_58M_MCS6,
+        RATE_N_65M_MCS6_SHORT_GI,
+        RATE_N_65M_MCS7,
+        RATE_N_72M_MCS7_SHORT_GI,
+
+        COUNT
     };
 
     bool set_rate(Rate rate);
