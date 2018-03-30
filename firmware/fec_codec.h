@@ -39,6 +39,7 @@ public:
     };
 
     bool init(const Descriptor& descriptor);
+    bool is_initialized() const;
 
     const Descriptor& get_descriptor() const;
 

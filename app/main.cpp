@@ -1,4 +1,3 @@
-#include "Fec_Encoder.h"
 #include "Phy.h"
 #include "utils/pigpio.h"
 #include <iostream>
@@ -13,24 +12,25 @@
 bool s_verbose = false;
 bool s_flush = false;
 
-bool s_fec_benchmark = false;
 bool s_phy_benchmark = false;
 bool s_use_fec = false;
 uint32_t s_fec_coding_k = 0;
 uint32_t s_fec_coding_n = 0;
 
-const size_t MAX_MTU = Phy::MAX_PAYLOAD_SIZE - Fec_Encoder::PAYLOAD_OVERHEAD;
+const size_t MAX_MTU = Phy::MAX_PAYLOAD_SIZE;
 size_t s_mtu = MAX_MTU;
 
 bool s_use_spi_dev = true;
 std::string s_spi_dev = "/dev/spidev0.0";
 size_t s_pigpio_spi_port = 0;
 size_t s_pigpio_spi_channel = 0;
-size_t s_spi_speed = 8000000;
+size_t s_spi_speed = 4000000;
 size_t s_spi_delay = 20;
 Phy::Rate s_phy_rate = Phy::Rate::RATE_B_5_5M_CCK;
 float s_phy_power = 20.5f;
 uint8_t s_phy_channel = 1;
+
+typedef std::chrono::high_resolution_clock Clock;
 
 /* This prints an "Assertion failed" message and aborts.  */
 void __assert_fail(const char *__assertion, const char *__file, unsigned int __line, const char *__function)
@@ -42,10 +42,9 @@ void __assert_fail(const char *__assertion, const char *__file, unsigned int __l
 
 void show_help()
 {
-    std::cout << "Esp8266 Broadcast with FEC support\n";
+    std::cout << "Esp32 Broadcast with FEC support\n";
     std::cout << "Usage:\n";
     std::cout << "\t--hrlp\tShows this help message\n";
-    std::cout << "\t--fec-benchmark\tRuns a FEC benchmark\n";
     std::cout << "\t--phy-benchmark\tRuns a PHY bandwidth benchmark\n";
     std::cout << "\t--verbose\tPrint out the settings\n";
     std::cout << "\t--flush\tFlush stdout when writing to it. This can reduce latency\n";
@@ -104,10 +103,6 @@ int parse_arguments(int argc, const char* argv[])
             show_help();
             return 0;
         }
-        else if (arg == "--fec-benchmark")
-        {
-            s_fec_benchmark = true;
-        }
         else if (arg == "--phy-benchmark")
         {
             s_phy_benchmark = true;
@@ -129,10 +124,9 @@ int parse_arguments(int argc, const char* argv[])
             }
             s_fec_coding_k = std::stoul(argv[i + 1]);
             s_fec_coding_n = std::stoul(argv[i + 2]);
-            if (s_fec_coding_k > s_fec_coding_n || s_fec_coding_k > Fec_Encoder::MAX_CODING_K || s_fec_coding_n > Fec_Encoder::MAX_CODING_N)
+            if (s_fec_coding_k > s_fec_coding_n)
             {
-                std::cerr << "FEC coding K has to be smaller than N. K has to be <= than " << std::to_string(Fec_Encoder::MAX_CODING_K) <<
-                             " and N has to be  <= than " << std::to_string(Fec_Encoder::MAX_CODING_N) << "\n";
+                std::cerr << "FEC coding K has to be smaller than N.\n";
                 return -1;
             }
             s_use_fec = true;
@@ -243,146 +237,8 @@ int parse_arguments(int argc, const char* argv[])
 }
 
 
-int run_fec_benchmark()
+int run(Phy& phy)
 {
-    Fec_Encoder tx;
-    Fec_Encoder rx;
-
-    Fec_Encoder::TX_Descriptor tx_descriptor;
-    tx_descriptor.coding_k = s_fec_coding_k;
-    tx_descriptor.coding_n = s_fec_coding_n;
-    tx_descriptor.mtu = s_mtu;
-    if (!tx.init_tx(tx_descriptor))
-    {
-        return -1;
-    }
-
-    Fec_Encoder::RX_Descriptor rx_descriptor;
-    rx_descriptor.coding_k = s_fec_coding_k;
-    rx_descriptor.coding_n = s_fec_coding_n;
-    rx_descriptor.mtu = s_mtu;
-    if (!rx.init_rx(rx_descriptor))
-    {
-        return -1;
-    }
-
-    typedef Fec_Encoder::Clock Clock;
-
-    std::string reference = "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine."
-            "This is a test sentence. There are many like it, but this one is mine.";
-
-    size_t total_data_size = 0;
-    size_t total_fec_data_size = 0;
-
-    size_t encoded_packets = 0;
-    size_t encoded_size = 0;
-    size_t decoded_packets = 0;
-    size_t decoded_size = 0;
-
-    tx.on_tx_data_encoded = [&rx, &encoded_size, &encoded_packets, &total_fec_data_size](void const* data, size_t size)
-    {
-        total_fec_data_size += size;
-        encoded_size += size;
-        encoded_packets++;
-        rx.add_rx_packet(data, size, true);
-    };
-
-    rx.on_rx_data_decoded = [&reference, &decoded_size, &decoded_packets](void const* data, size_t size)
-    {
-        decoded_size += size;
-        decoded_packets++;
-    };
-
-    float seconds = 5.f;
-    Clock::time_point start_tp = Clock::now();
-    while (Clock::now() - start_tp < std::chrono::duration<float>(seconds))
-    {
-        tx.add_tx_packet(reference.data(), reference.size(), true);
-        total_data_size += reference.size();
-    }
-
-    while (decoded_size + s_mtu * 2 < total_data_size)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    float total_data_size_mb = static_cast<float>(total_data_size) / (1024.f * 1024.f);
-    float total_fec_data_size_mb = static_cast<float>(total_fec_data_size) / (1024.f * 1024.f);
-    std::cout << "Data:\t" << std::to_string(total_data_size_mb) << " MB, " << std::to_string(total_data_size_mb / seconds) << " MBps\n";
-    std::cout << "FEC Data:\t" << std::to_string(total_fec_data_size_mb) << " MB, " << std::to_string(total_fec_data_size_mb / seconds) << " MBps\n";
-
-    std::cout << "Encoded:\n";
-    std::cout << "\t" << std::to_string(static_cast<float>(encoded_size)  / (seconds * 1024.f * 1024.f)) << " MBps\n";
-    std::cout << "\t" << std::to_string(encoded_packets) << " packets\n";
-    std::cout << "Decoded:\n";
-    std::cout << "\t" << std::to_string(static_cast<float>(decoded_size) / (seconds * 1024.f * 1024.f)) << " MBps\n";
-    std::cout << "\t" << std::to_string(decoded_packets) << " packets\n";
-
-    return 0;
-}
-
-
-int run_fec(Phy& phy)
-{
-    if (s_verbose)
-    {
-        std::cout << "FEC\n\tK " << std::to_string(s_fec_coding_k) <<
-                     "\n\tN " << std::to_string(s_fec_coding_n) << "\n";
-    }
-
-    typedef Fec_Encoder::Clock Clock;
-
-    Fec_Encoder tx;
-    Fec_Encoder rx;
-
-    Fec_Encoder::TX_Descriptor tx_descriptor;
-    tx_descriptor.coding_k = s_fec_coding_k;
-    tx_descriptor.coding_n = s_fec_coding_n;
-    tx_descriptor.mtu = s_mtu;
-    if (!tx.init_tx(tx_descriptor))
-    {
-        return -1;
-    }
-
-    Fec_Encoder::RX_Descriptor rx_descriptor;
-    rx_descriptor.coding_k = s_fec_coding_k;
-    rx_descriptor.coding_n = s_fec_coding_n;
-    rx_descriptor.mtu = s_mtu;
-    if (!rx.init_rx(rx_descriptor))
-    {
-        return -1;
-    }
-
-    tx.on_tx_data_encoded = [&phy](void const* data, size_t size)
-    {
-//        std::cout << "sending fec data " << std::to_string(size) << "\n";
-        phy.send_data(data, size);
-    };
-
-    rx.on_rx_data_decoded = [](void const* data, size_t size)
-    {
-        std::cout.write(reinterpret_cast<const char*>(data), size);
-        if (s_flush)
-        {
-            std::flush(std::cout);
-        }
-    };
-
     std::array<uint8_t, Phy::MAX_PAYLOAD_SIZE> rx_data;
     size_t rx_data_size = 0;
     int rx_rssi = 0;
@@ -402,50 +258,7 @@ int run_fec(Phy& phy)
         if (Clock::now() - last_receive_tp >= std::chrono::microseconds(500))
         {
             last_receive_tp = Clock::now();
-            if (phy.receive_data(rx_data.data(), rx_data_size, rx_rssi))
-            {
-                //std::cout << "received packet " << std::to_string(rx_data_size) << "\n";
-                rx.add_rx_packet(rx_data.data(), rx_data_size, true);
-            }
-        }
-
-        {
-            int res = read(STDIN_FILENO, tx_data.data(), tx_data.size());
-            if (res > 0)
-            {
-                tx.add_tx_packet(tx_data.data(), static_cast<size_t>(res), true);
-            }
-        }
-    }
-
-    return 0;
-}
-
-int run_no_fec(Phy& phy)
-{
-    typedef Fec_Encoder::Clock Clock;
-
-
-    std::array<uint8_t, Phy::MAX_PAYLOAD_SIZE> rx_data;
-    size_t rx_data_size = 0;
-    int rx_rssi = 0;
-
-    std::array<uint8_t, Phy::MAX_PAYLOAD_SIZE> tx_data;
-
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(STDIN_FILENO, &fds);
-
-    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
-
-    Clock::time_point last_receive_tp = Clock::now();
-    while (true)
-    {
-        if (Clock::now() - last_receive_tp >= std::chrono::microseconds(500))
-        {
-            last_receive_tp = Clock::now();
-            if (phy.receive_data(rx_data.data(), rx_data_size, rx_rssi))
+            if (phy.receive_data(0, rx_data.data(), rx_data_size, rx_rssi))
             {
                 std::cout.write(reinterpret_cast<const char*>(rx_data.data()), rx_data_size);
                 if (s_flush)
@@ -459,7 +272,7 @@ int run_no_fec(Phy& phy)
             int res = read(STDIN_FILENO, tx_data.data(), s_mtu);
             if (res > 0)
             {
-                phy.send_data(tx_data.data(), res);
+                phy.send_data(0, tx_data.data(), res);
             }
         }
     }
@@ -497,10 +310,6 @@ int main(int argc, const char* argv[])
         return -1;
     }
 
-    if (s_fec_benchmark)
-    {
-        return run_fec_benchmark();
-    }
     if (s_phy_benchmark)
     {
         //return run_phy_benchmark();
@@ -560,7 +369,7 @@ int main(int argc, const char* argv[])
                   << "\n";
     }
 
-    result = s_use_fec ? run_fec(phy) : run_no_fec(phy);
+    result = run(phy);
 
     gpioTerminate();
 

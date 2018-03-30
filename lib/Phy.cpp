@@ -11,19 +11,20 @@
 #include <unistd.h>
 #include <cassert>
 
-static const size_t CHUNK_SIZE = 64;
+static const size_t CHUNK_SIZE = 1024;
 
 enum SPI_Command : uint16_t
 {
-    SPI_CMD_SEND_PACKET = 1,
-    SPI_CMD_GET_PACKET = 2,
+    SPI_CMD_SEND_PACKET = 1, //8 bits - fec_channel, 16 bits - payload size / fragment size
+    SPI_CMD_GET_PACKET = 2, //8 bits - fec_channel, 16 bits - payload size / fragment size
     SPI_CMD_SET_RATE = 3,
     SPI_CMD_GET_RATE = 4,
-    SPI_CMD_SET_CHANNEL = 5,
-    SPI_CMD_GET_CHANNEL = 6,
-    SPI_CMD_SET_POWER = 7,
-    SPI_CMD_GET_POWER = 8,
-    SPI_CMD_GET_STATS = 9,
+    SPI_CMD_SETUP_FEC_CHANNEL = 5, //8 bits - fec_channel, 8 bits - K, 8 bits - N, 16 bits - MTU
+    SPI_CMD_SET_CHANNEL = 6,
+    SPI_CMD_GET_CHANNEL = 7,
+    SPI_CMD_SET_POWER = 8,
+    SPI_CMD_GET_POWER = 9,
+    SPI_CMD_GET_STATS = 10,
 };
 
 const size_t Phy::MAX_PAYLOAD_SIZE;
@@ -95,7 +96,7 @@ Phy::Init_Result Phy::init_pigpio(size_t port, size_t channel, size_t speed, siz
         return Init_Result::ALREADY_INITIALIZED;
     }
 
-    m_speed = 10000000;//speed;
+    m_speed = speed;
     m_comms_delay = comms_delay;
 
     if (port > 1)
@@ -144,7 +145,7 @@ Phy::Init_Result Phy::init_dev(const char* device, size_t speed, size_t comms_de
         return Init_Result::ALREADY_INITIALIZED;
     }
 
-    speed = 10000000;
+    //speed = 10000000;
 
     if (speed == 0)
     {
@@ -181,12 +182,9 @@ Phy::Init_Result Phy::init_dev(const char* device, size_t speed, size_t comms_de
     m_comms_delay = comms_delay;
     m_speed = speed;
 
-    memset(m_spi_transfers.data(), 0, sizeof(spi_ioc_transfer) * m_spi_transfers.size());
-    for (std::vector<uint8_t>& transfer_data: m_spi_transfers_data)
+    for (spi_ioc_transfer& spi_transfer : m_spi_transfers)
     {
-        transfer_data.resize(2 + CHUNK_SIZE);
-        transfer_data[0] = 0x2;
-        transfer_data[1] = 0x0;
+        memset(&spi_transfer, 0, sizeof(spi_ioc_transfer));
     }
 
     return Init_Result::OK;
@@ -274,7 +272,7 @@ bool Phy::send_command(uint32_t command)
 
 //////////////////////////////////////////////////////////////////////////////
 
-bool Phy::send_data(void const* data, size_t size)
+bool Phy::send_data(size_t fec_channel, void const* data, size_t size)
 {
     if (size > MAX_PAYLOAD_SIZE)
     {
@@ -365,7 +363,7 @@ bool Phy::send_data(void const* data, size_t size)
 
 //////////////////////////////////////////////////////////////////////////////
 
-bool Phy::receive_data(void* data, size_t& size, int& rssi)
+bool Phy::receive_data(size_t fec_channel, void* data, size_t& size, int& rssi)
 {
     std::lock_guard<std::mutex> lg(m_mutex);
 
@@ -593,14 +591,14 @@ void Phy::process()
 
     //set_status(0);
 
-    std::array<uint8_t, 1404> tx_payload = { 0 };
-    std::array<uint8_t, 1404> rx_payload = { 0 };
+    std::array<uint8_t, CHUNK_SIZE> tx_payload = { 0 };
+    std::array<uint8_t, CHUNK_SIZE> rx_payload = { 0 };
     for (size_t i = 0; i < tx_payload.size(); i++)
     {
         tx_payload[i] = ('A' + i % 26);
     }
 
-    uint32_t command = (SPI_Command::SPI_CMD_SEND_PACKET << 24) | (33 + 2); //add the crc size
+    uint32_t command = (SPI_Command::SPI_CMD_SEND_PACKET << 24) | (tx_payload.size() - 4);
     memcpy(tx_payload.data(), &command, 4);
 
 
@@ -619,9 +617,9 @@ void Phy::process()
         {
             std::cout << std::to_string(status) << " err\n";
         }
-        std::flush(std::cout);
+        //std::flush(std::cout);
 
-        gpioDelay(100);
+        //gpioDelay(100);
 
         //exit(1);
 

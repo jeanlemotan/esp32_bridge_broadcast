@@ -57,18 +57,12 @@ DESTDIR = ../../bin
 
 HEADERS += \
     ../../../lib/Phy.h \
-    ../../../lib/utils/fec.h \
     ../../../lib/utils/pigpio.h \
-    ../../../lib/utils/command.h \
-    ../../../lib/Pool.h \
-    ../../../lib/Fec_Encoder.h \
-    ../../../lib/Queue.h
+    ../../../lib/utils/command.h
 
 SOURCES += \
     ../../main.cpp \
     ../../../lib/Phy.cpp \
-    ../../../lib/utils/fec.cpp \
     ../../../lib/utils/pigpio.c \
-    ../../../lib/utils/command.c \
-    ../../../lib/Fec_Encoder.cpp
+    ../../../lib/utils/command.c
 

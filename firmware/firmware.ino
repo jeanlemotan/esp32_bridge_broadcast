@@ -12,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "wifi_raw.h"
 #include "fec_codec.h"
+#include "rom/crc.h"
 
 #include "structures.h"
 
@@ -59,11 +60,6 @@ static constexpr gpio_num_t GPIO_MISO = gpio_num_t(12);
 static constexpr gpio_num_t GPIO_SCLK = gpio_num_t(14);
 static constexpr gpio_num_t GPIO_CS = gpio_num_t(15);
 
-
-/////////////////////////////////////////////////////////////////////////
-
-static constexpr uint8_t s_filtered_mac[] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, };
-
 /////////////////////////////////////////////////////////////////////////
 
 static int s_uart_verbose = 1;
@@ -93,7 +89,7 @@ void set_status_led_on()
     s_status_led_tp = millis();
 }
 
-void update_status_led()
+IRAM_ATTR void update_status_led()
 {
     if (s_status_led_tp == 0)
     {
@@ -110,120 +106,21 @@ void update_status_led()
 /////////////////////////////////////////////////////////////////////////
 
 Fec_Codec s_fec_codec;
-size_t s_fec_encoded_data_size = 0;
-size_t s_fec_decoded_data_size = 0;
-
-void fec_encoded_cb(void* data, size_t size)
-{
-    s_fec_encoded_data_size += size;
-}
-void fec_decoded_cb(void* data, size_t size)
-{
-    s_fec_decoded_data_size += size;
-}
-
-void test_fec_encoding()
-{
-    s_fec_encoded_data_size = 0;
-    s_fec_decoded_data_size = 0;
-    s_fec_codec.set_data_encoded_cb(&fec_encoded_cb);
-    s_fec_codec.set_data_decoded_cb(&fec_decoded_cb);
-
-    LOG("starting test\n");
-
-    uint8_t data[128] = { 0 };
-
-    uint32_t start_tp = millis();
-
-    size_t iteration = 0;
-    size_t fec_data_in = 0;
-    //encode
-    while (millis() - start_tp < 1000)
-    {
-//        Serial.printf("Encoding %d\n", iteration);
-
-        if (!s_fec_codec.encode_data(data, sizeof(data), true))
-        {
-            Serial.printf("Failed to encode\n");
-            return;
-        }
-        fec_data_in += sizeof(data);
-        //LOG("Pass %d %dms\n", i, millis() - start_pass_tp);
-
-        iteration++;
-    }
-    float ds = 1.f;//d / 1000.f;
-    float total_data_in = fec_data_in / 1024.f;
-    float total_data_out = s_fec_encoded_data_size / 1024.f;
-    LOG("Total IN: %.2fKB, %.2fKB/s, OUT: %.2fKB, %.2fKB/s\n", total_data_in, total_data_in / ds, total_data_out, total_data_out / ds);
-}
-
-volatile size_t xxx = 0;
-void fec_encoded2_cb(void* data, size_t size)
-{
-    s_fec_encoded_data_size += size;
-
-    //if (rand() > RAND_MAX / 4)
-    xxx++;
-
-    size_t n = s_fec_codec.get_descriptor().coding_n;
-    if ((xxx % n) < n * 75 / 100)
-    {
-        s_fec_codec.decode_data(data, size, true);
-    }
-    else
-    {
-        //LOG("Skipped packet %d\n", xxx);
-    }
-}
-
-void test_fec_decoding()
-{
-    s_fec_encoded_data_size = 0;
-    s_fec_decoded_data_size = 0;
-    s_fec_codec.set_data_encoded_cb(&fec_encoded2_cb);
-    s_fec_codec.set_data_decoded_cb(&fec_decoded_cb);
-
-    LOG("starting test\n");
-
-    uint8_t data[128] = { 0 };
-
-    uint32_t start_tp = millis();
-
-    size_t iteration = 0;
-    size_t fec_data_in = 0;
-    //encode
-    while (millis() - start_tp < 1000)
-    {
-        //Serial.printf("Encoding %d\n", iteration);
-
-        if (!s_fec_codec.encode_data(data, sizeof(data), true))
-        {
-            Serial.printf("Failed to encode\n");
-            return;
-        }
-        fec_data_in += sizeof(data);
-        //LOG("Pass %d %dms\n", i, millis() - start_pass_tp);
-
-        iteration++;
-    }
-    float ds = 1.f;//d / 1000.f;
-    float total_data_in = fec_data_in / 1024.f;
-    float total_data_encoded = s_fec_encoded_data_size / 1024.f;
-    float total_data_decoded = s_fec_decoded_data_size / 1024.f;
-    LOG("Total IN: %.2fKB, %.2fKB/s, ENCODED: %.2fKB, %.2fKB/s, DECODED: %.2fKB, %.2fKB/s\n", total_data_in, total_data_in / ds, total_data_encoded, total_data_encoded / ds, total_data_decoded, total_data_decoded / ds);
-}
 
 /////////////////////////////////////////////////////////////////////////
 
-S2W_Packet s_wlan_packet;
+Wlan_Outgoing_Packet s_outgoing_wlan_packet;
 float s_wlan_power_dBm = 0;
 
-void set_wlan_power_dBm(float dBm)
+esp_err_t set_wlan_power_dBm(float dBm)
 {
-    dBm = std::max(std::min(dBm, 20.5f), 0.f);
+    constexpr float k_min = 14.f;
+    constexpr float k_max = 20.5f;
+  
+    dBm = std::max(std::min(dBm, k_max), k_min);
     s_wlan_power_dBm = dBm;
-    //system_phy_set_max_tpw(static_cast<uint8_t>(dBm * 4.f));
+    int8_t power = static_cast<int8_t>(((dBm - k_min) / (k_max - k_min)) * 80) + 7;
+    return esp_wifi_set_max_tx_power(power);
 }
 
 float get_wlan_power_dBm()
@@ -231,68 +128,50 @@ float get_wlan_power_dBm()
     return s_wlan_power_dBm;
 }
 
+uint8_t s_wlan_rate = 0;
 esp_err_t set_wifi_fixed_rate(uint8_t value)
 {
     //https://github.com/espressif/esp-idf/issues/833
     wifi_internal_rate_t rate;
-    rate.fix_rate = value;
+    s_wlan_rate = value <= 30 ? value : 30;
+    rate.fix_rate = s_rate_mapping[s_wlan_rate];
     return esp_wifi_internal_set_rate(100, 1, 4, &rate);
 }
 
-esp_err_t event_handler(void *ctx, system_event_t *event)
+uint8_t get_wifi_fixed_rate()
+{
+    return s_wlan_rate;
+}
+
+IRAM_ATTR esp_err_t event_handler(void *ctx, system_event_t *event)
 {
     return ESP_OK;
 }
 
-void packet_sent_cb(uint8_t status)
+IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 {
-    {
-        lock_guard lg;
-
-        if (s_wlan_packet.ptr)
-        {
-            if (status == 0)
-            {
-                //int dt = micros() - s_send_start_time;
-                //s_send_max_time = std::max(s_send_max_time, dt);
-                //s_send_min_time = std::min(s_send_min_time, dt);
-                s_stats.wlan_data_sent += s_wlan_packet.size + WLAN_HEADER_SIZE;
-            }
-            else
-            {
-                LOG("WLAN send error");
-                s_stats.wlan_error_count++;
-            }
-            end_reading_s2w_packet(s_wlan_packet);
-            //xxx s_wlan_free_queue.push_and_clear(s_wlan_packet);
-        }
-        else
-        {
-            LOG("WLAN send missing packet");
-            s_stats.wlan_error_count++;
-        }
-    }
-}
-
-void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
-{
-    /*  if (type == WIFI_PKT_MGMT)
+  if (type == WIFI_PKT_MGMT)
   {
-    Serial.printf("management packet\n");
+    //Serial.printf("management packet\n");
+    return;
   }
   else if (type == WIFI_PKT_DATA)
   {
-    Serial.printf("data packet\n");
+    //Serial.printf("data packet\n");
   }
   else if (type == WIFI_PKT_MISC)
   {
-    Serial.printf("misc packet\n");
+    //Serial.printf("misc packet\n");
+    return;
   }
 
   wifi_promiscuous_pkt_t* pkt = reinterpret_cast<wifi_promiscuous_pkt_t*>(buf);
   
   uint16_t len = pkt->rx_ctrl.sig_len;
-  if (len <= HEADER_SIZE)
+  //s_stats.wlan_data_received += len;
+  //s_stats.wlan_data_sent += 1;
+
+  if (len <= WLAN_HEADER_SIZE)
   {
     LOG("WLAN receive header error");
     s_stats.wlan_error_count++;
@@ -305,18 +184,18 @@ void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
   //uint8_t broadcast_mac[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
   //Serial.printf("MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   uint8_t* data = pkt->payload;
-//  if (memcmp(data + 10, s_filtered_mac, 6) != 0)
-//  {
-//    return;
-//  }
+  if (memcmp(data + 10, s_wlan_packet_header + 10, 6) != 0)
+  {
+    return;
+  }
 
-  data += HEADER_SIZE;
-  len -= HEADER_SIZE; //skip the 802.11 header
+  data += WLAN_HEADER_SIZE;
+  len -= WLAN_HEADER_SIZE; //skip the 802.11 header
 
   len -= 4;//the received length has 4 more bytes at the end for some reason.
 
   int16_t rssi = pkt->rx_ctrl.rssi;
-  if (s_uart_verbose >= 1)
+/*  if (s_uart_verbose >= 1)
   {
     Serial.printf("RSSI: %d, CH: %d, SZ: %d\n", rssi, pkt->rx_ctrl.channel, len);
     if (s_uart_verbose >= 2)
@@ -326,13 +205,13 @@ void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
       Serial.printf("\n<----\n");
     }
   }
-
-  size_t size = std::min<size_t>(len, MAX_PAYLOAD_SIZE);
-
+*/
+  size_t size = std::min<size_t>(len, WLAN_MAX_PAYLOAD_SIZE);
+/*
   uint8_t* buffer = nullptr;
   {
     lock_guard lg;
-    buffer = s_w2s_queue.start_writing(size);
+    buffer = s_wlan_incoming_queue.start_writing(size);
     //xxx p = s_spi_free_queue.pop();
   }
   
@@ -343,7 +222,7 @@ void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
     
     {
       lock_guard lg;
-      s_w2s_queue.end_writing();
+      s_wlan_incoming_queue.end_writing();
       //xxx s_spi_to_send_queue.push(p);
     }
   }
@@ -351,14 +230,13 @@ void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
   {
     s_stats.wlan_received_packets_dropped++;
   }
+*/  
   s_stats.wlan_data_received += len;
-
-  //*/
 }
 
 /////////////////////////////////////////////////////////////////////////
 
-uint8_t s_uart_buffer[MAX_WLAN_PAYLOAD_SIZE];
+uint8_t s_uart_buffer[WLAN_MAX_PAYLOAD_SIZE];
 size_t s_uart_offset = 0;
 
 void parse_command()
@@ -398,8 +276,8 @@ void parse_command()
             char ch = Serial.read();
             if (ch == '\n' && s_uart_offset > 0)
             {
-                S2W_Packet packet;
-                start_writing_s2w_packet(packet, s_uart_offset);
+                Wlan_Outgoing_Packet packet;
+                start_writing_wlan_outgoing_packet(packet, s_uart_offset);
                 if (!packet.ptr)
                 {
                     LOG("Sending failed: previous packet still in flight\n");
@@ -412,21 +290,21 @@ void parse_command()
                 memcpy(packet.payload_ptr, s_uart_buffer, s_uart_offset);
 
                 LOG("Sending packet of size %d\n", packet.size);
-                end_writing_s2w_packet(packet);
+                end_writing_wlan_outgoing_packet(packet);
                 s_uart_command = 0;
                 s_uart_offset = 0;
 
-                if (s_wlan_packet.ptr)
+                if (s_outgoing_wlan_packet.ptr)
                 {
-                    end_reading_s2w_packet(s_wlan_packet);
+                    end_reading_wlan_outgoing_packet(s_outgoing_wlan_packet);
                 }
             }
             else
             {
-                if (s_uart_offset >= MAX_WLAN_PAYLOAD_SIZE)
+                if (s_uart_offset >= WLAN_MAX_PAYLOAD_SIZE)
                 {
                     while (available-- > 0) Serial.read();
-                    LOG("Packet too big: %d > %d\n", s_uart_offset + 1, MAX_WLAN_PAYLOAD_SIZE);
+                    LOG("Packet too big: %d > %d\n", s_uart_offset + 1, WLAN_MAX_PAYLOAD_SIZE);
 
                     s_uart_command = 0;
                     s_uart_offset = 0;
@@ -502,16 +380,16 @@ void parse_command()
         s_uart_command = 0;
 
         uint8_t rate = 0;
-        char ch = Serial.read();
-        if (ch >= '0' && ch <= '9') rate = ch - '0';
-        else if (ch >= 'A' && ch <= 'Z') rate = ch - 'A' + 10;
-        else if (ch >= 'a' && ch <= 'z') rate = ch - 'a' + 10;
-        else
+        do
         {
-            s_uart_error_count++;
-            LOG("Command error: Illegal rate %c\n", ch);
-            return;
-        }
+          char ch = Serial.read();
+          if (ch >= '0' && ch <= '9') rate = rate * 10 + (ch - '0');
+          else
+          {
+            break;
+          }
+        } while (true);
+        
         if (set_wifi_fixed_rate(rate) == ESP_OK)
         {
             LOG("Rate set to %d\n", rate);
@@ -531,122 +409,20 @@ void parse_command()
 
 /////////////////////////////////////////////////////////////////////////
 
-S2W_Packet s_spi_incoming_packet;
-W2S_Packet s_spi_outgoing_packet;
+#include "spi_comms.h"
 
-enum SPI_Command : uint16_t
-{
-    SPI_CMD_SEND_PACKET = 1,
-    SPI_CMD_GET_PACKET = 2,
-    SPI_CMD_SET_RATE = 3,
-    SPI_CMD_GET_RATE = 4,
-    SPI_CMD_SET_CHANNEL = 5,
-    SPI_CMD_GET_CHANNEL = 6,
-    SPI_CMD_SET_POWER = 7,
-    SPI_CMD_GET_POWER = 8,
-    SPI_CMD_GET_STATS = 9,
-};
-
-uint32_t s_spi_temp_buffer[16];
-
-void spi_on_data_received()
-{
-    /*  lock_guard lg;
-
-  if (s_spi_incoming_packet.ptr)
-  {
-    uint32_t poffset = s_spi_incoming_packet.offset;
-    uint32_t psize = s_spi_incoming_packet.size;
-
-    uint32_t size = psize - poffset;
-    if (size > CHUNK_SIZE)
-    {
-      size = CHUNK_SIZE;
-    }
-    
-    if (size == CHUNK_SIZE && ((size_t)(s_spi_incoming_packet.payload_ptr + poffset) & 3) == 0)
-    {
-      spi_slave_get_data((uint32_t*)(s_spi_incoming_packet.payload_ptr + poffset));
-    }
-    else
-    {
-      spi_slave_get_data(s_spi_temp_buffer);
-      memcpy(s_spi_incoming_packet.payload_ptr + poffset, s_spi_temp_buffer, size);
-    }
-    
-    s_spi_incoming_packet.offset += size;
-    if (s_spi_incoming_packet.offset >= psize)
-    {
-      end_writing_s2w_packet(s_spi_incoming_packet);
-      //s_stats.spi_packets_received++;
-    }
-    s_stats.spi_data_received += size;
-  }
-  else
-  {
-    s_stats.spi_error_count++;
-    //Serial.printf("Unexpected data\n");
-  }
-*/}
-
-void spi_on_data_sent()
-{
-    /*  lock_guard lg;
-
-  if (s_spi_outgoing_packet.ptr)
-  {
-    uint32_t psize = s_spi_outgoing_packet.size;
-    uint32_t size = psize - s_spi_outgoing_packet.offset;
-    if (size > CHUNK_SIZE)
-    {
-      size = CHUNK_SIZE;
-    }
-    s_spi_outgoing_packet.offset += size;
-    if (s_spi_outgoing_packet.offset >= psize)
-    {
-      end_reading_w2s_packet(s_spi_outgoing_packet);
-      //xxx s_spi_free_queue.push_and_clear(s_spi_outgoing_packet);
-      //s_spi_packets_sent++;
-    }
-    else
-    {
-      size_t poffset = s_spi_outgoing_packet.offset;
-      //prepare next transfer
-      if (size == CHUNK_SIZE && ((size_t)(s_spi_outgoing_packet.ptr + poffset) & 3) == 0)
-      {
-        spi_slave_set_data((uint32_t*)(s_spi_outgoing_packet.ptr + poffset));
-      }
-      else
-      {
-        memcpy(s_spi_temp_buffer, s_spi_outgoing_packet.ptr + poffset, size);
-        spi_slave_set_data(s_spi_temp_buffer);
-      }
-    }
-
-    s_stats.spi_data_sent += size;
-  }
-  else
-  {
-    LOG("SPI send missing packet\n");
-    s_stats.spi_error_count++;
-  }
-*/}
-
-
-/////////////////////////////////////////////////////////////////////////
-
-constexpr size_t MAX_SPI_BUFFER_SIZE = MAX_WLAN_PACKET_SIZE + 8;
+static constexpr size_t MAX_SPI_BUFFER_SIZE = 1392; //has to be multiple of 16
 uint8_t* s_spi_tx_buffer = nullptr;
 uint8_t* s_spi_rx_buffer = nullptr;
 uint8_t* s_spi_rx_payload_ptr = nullptr;
 int s_spi_transaction_id = 0;
 
-void spi_post_setup_cb(spi_slave_transaction_t* trans)
+IRAM_ATTR void spi_post_setup_cb(spi_slave_transaction_t* trans)
 {
 //    LOG("SPI armed %d: %d\n", (int)trans->user, trans->length / 8);
 }
 
-void spi_post_trans_cb(spi_slave_transaction_t* trans)
+IRAM_ATTR void spi_post_trans_cb(spi_slave_transaction_t* trans)
 {
 //    LOG("SPI done %d: %d / %d\n", (int)trans->user, trans->length / 8, trans->trans_len / 8);
 }
@@ -693,14 +469,19 @@ esp_err_t init_spi()
 }
 
 
-void setup_spi_idle_transfer()
+IRAM_ATTR void setup_spi_idle_transfer(bool last_command_ok)
 {
     //LOG("ARM SPI idle transfer\n");
 
     static spi_slave_transaction_t t;
     memset(&t, 0, sizeof(t));
-    *reinterpret_cast<uint32_t*>(s_spi_tx_buffer) = 0xABCD;
-    t.length = MAX_SPI_BUFFER_SIZE * 8;
+    
+    SPI_Base_Response response;
+    response.last_command_ok = last_command_ok ? 1 : 0;
+    
+    memcpy(s_spi_tx_buffer, &response, sizeof(response));
+    
+    t.length = sizeof(response) * 8;
     t.tx_buffer = s_spi_tx_buffer;
     t.rx_buffer = s_spi_rx_buffer;
     //t.user = (void*)s_spi_transaction_id++;
@@ -708,165 +489,274 @@ void setup_spi_idle_transfer()
     ESP_ERROR_CHECK(err);
 }
 
-void process_spi_transaction(spi_slave_transaction_t* trans)
+IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
 {
     //LOG("SPI done %d: %d / %d\n", (int)trans->user, trans->length / 8, trans->trans_len / 8);
 
-    size_t transfer_size = trans->trans_len / 8;
-    if (transfer_size < 4)
     {
-      LOG("SPI error: transfer too small: %d\n", transfer_size);
-      setup_spi_idle_transfer();
-      return;
-    }
-
-    size_t payload_size = transfer_size - 4;
-
-    //lock_guard lg;
-
-    uint32_t status = *reinterpret_cast<uint32_t*>(s_spi_rx_buffer);
-
-    //  Serial.printf("spi status received sent: %d\n", status);
-    SPI_Command command = (SPI_Command)(status >> 24);
-    if (command == SPI_Command::SPI_CMD_SEND_PACKET)
-    {
-        uint32_t size = status & 0xFFFF;
-        if (size > MAX_WLAN_PAYLOAD_SIZE || size != payload_size)
+        size_t transfer_size = trans->trans_len >> 3;
+        if (transfer_size < 4)
         {
-            s_stats.spi_error_count++;
-            //LOG("Packet too big: %d\n", size);
+          LOG("SPI error: transfer too small: %d\n", transfer_size);
+          goto error;
         }
-        else
+    
+        s_stats.spi_data_received += transfer_size;
+    
+        size_t payload_size = transfer_size - 4;
+        const uint8_t* payload_ptr = reinterpret_cast<const uint8_t*>(s_spi_rx_buffer + 4);
+    
+        //lock_guard lg;
+    
+        SPI_Base_Header& base_header = *reinterpret_cast<SPI_Base_Header*>(s_spi_rx_buffer);
+        SPI_Command command = static_cast<SPI_Command>(base_header.command);
+        uint8_t crc = base_header.crc;
+    
+        //  Serial.printf("spi header received sent: %d\n", header);
+        if (command == SPI_Command::SPI_CMD_SEND_PACKET)
         {
-            LOG("Received spi packet: %d\n", size);
-        }
-        setup_spi_idle_transfer();
-        return;
-    }
-
-    if (command == SPI_Command::SPI_CMD_GET_PACKET)
-    {
-        LOG("Get SPI packet\n");
-
-/*        if (!s_spi_outgoing_packet.ptr)
-        {
-            start_reading_w2s_packet(s_spi_outgoing_packet);
-            //xxx s_spi_outgoing_packet = s_spi_to_send_queue.pop();
-        }
-
-        if (s_spi_outgoing_packet.ptr)
-        {
-            uint32_t size = s_spi_outgoing_packet.size & 0xFFFF;
-            uint32_t rssi = 0;//*reinterpret_cast<uint8_t*>(&s_spi_outgoing_packet->rssi) & 0xFF;
-            uint32_t status = (uint32_t(SPI_Command::SPI_CMD_GET_PACKET) << 24) | (rssi << 16) | size;
-            //      spi_slave_set_status(status);
-
-            if (size > CHUNK_SIZE)
+            SPI_Send_Packet_Header& header = *reinterpret_cast<SPI_Send_Packet_Header*>(s_spi_rx_buffer);
+            header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+            if (crc != computed_crc)
             {
-                size = CHUNK_SIZE;
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
             }
-            if (size == CHUNK_SIZE && ((size_t)(s_spi_outgoing_packet.ptr) & 3) == 0)
+    
+            if (payload_size < header.size)
             {
-                //        spi_slave_set_data((uint32_t*)(s_spi_outgoing_packet.ptr));
+                LOG("Not enough data: %d, %d\n", header.size, payload_size);
+                goto error;
+            }
+    
+            Fec_Codec& codec = s_fec_codec;
+            if (!codec.is_initialized())
+            {
+                LOG("Uninitialized fec channel\n");
+                goto error;
+            }
+            if (!codec.encode_data(payload_ptr, header.size, false))
+            {
+                LOG("Fec channel busy\n");
+                goto error;
+            }
+            setup_spi_idle_transfer(true);
+            goto done;
+        }
+    
+        if (command == SPI_Command::SPI_CMD_SETUP_FEC_CODEC)
+        {
+            LOG("SPI_CMD_SETUP_FEC_CODEC\n");
+          
+            SPI_Setup_Fec_Codec_Header& header = *reinterpret_cast<SPI_Setup_Fec_Codec_Header*>(s_spi_rx_buffer);
+            header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+    
+            {
+                Fec_Codec::Descriptor descriptor;
+                uint8_t channel = (*payload_ptr++) - 1;
+                descriptor.coding_k = *payload_ptr++;
+                descriptor.coding_n = *payload_ptr++;
+                uint16_t mtu = 0;
+                memcpy(&mtu, payload_ptr, sizeof(uint16_t));
+                descriptor.mtu = mtu;
+                if (channel > 2 || descriptor.coding_k > descriptor.coding_n || descriptor.mtu < 32)
+                {
+                    LOG("Bad fec params");
+                    goto error;
+                }
+        
+                if (!s_fec_codec.init(descriptor))
+                {
+                    LOG("Failed to init fec channel: %d", channel);
+                    goto error;
+                }
+            }
+            setup_spi_idle_transfer(true);
+            goto done;
+        }
+    
+        if (command == SPI_Command::SPI_CMD_GET_PACKET)
+        {
+            LOG("SPI_CMD_GET_PACKET\n");
+          
+            SPI_Get_Packet_Header& header = *reinterpret_cast<SPI_Get_Packet_Header*>(s_spi_rx_buffer);
+            header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+    
+            
+    
+    /*        if (!s_spi_outgoing_packet.ptr)
+            {
+                start_reading_wlan_incoming_packet(s_spi_outgoing_packet);
+                //xxx s_spi_outgoing_packet = s_spi_to_send_queue.pop();
+            }
+    
+            if (s_spi_outgoing_packet.ptr)
+            {
+                uint32_t size = s_spi_outgoing_packet.size & 0xFFFF;
+                uint32_t rssi = 0;//*reinterpret_cast<uint8_t*>(&s_spi_outgoing_packet->rssi) & 0xFF;
+                uint32_t header = (uint32_t(SPI_Command::SPI_CMD_GET_PACKET) << 24) | (rssi << 16) | size;
+                //      spi_slave_set_status(header);
+    
+                if (size > CHUNK_SIZE)
+                {
+                    size = CHUNK_SIZE;
+                }
+                if (size == CHUNK_SIZE && ((size_t)(s_spi_outgoing_packet.ptr) & 3) == 0)
+                {
+                    //        spi_slave_set_data((uint32_t*)(s_spi_outgoing_packet.ptr));
+                }
+                else
+                {
+                    memcpy(s_spi_temp_buffer, s_spi_outgoing_packet.ptr, size);
+                    //        spi_slave_set_data(s_spi_temp_buffer);
+                }
             }
             else
             {
-                memcpy(s_spi_temp_buffer, s_spi_outgoing_packet.ptr, size);
-                //        spi_slave_set_data(s_spi_temp_buffer);
+                //      spi_slave_set_status(0);
             }
+    */
+            goto error;
+        }
+    
+        if (command == SPI_Command::SPI_CMD_SET_RATE)
+        {
+            LOG("SPI_CMD_SET_RATE\n");
+          
+            SPI_Set_Rate_Header& header = *reinterpret_cast<SPI_Set_Rate_Header*>(s_spi_rx_buffer);
+            header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+          
+            LOG("Setting rate: %d\n", (int)header.rate);
+            if (set_wifi_fixed_rate(header.rate) != ESP_OK)
+            {
+                LOG("Failed to set rate %d", (int)header.rate);
+                goto error;
+            }
+            setup_spi_idle_transfer(true);
+            goto done;
+        }
+        else if (command == SPI_Command::SPI_CMD_GET_RATE)
+        {
+            LOG("SPI_CMD_GET_RATE\n");
+          
+            base_header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&base_header), sizeof(base_header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+        }
+        else if (command == SPI_Command::SPI_CMD_SET_CHANNEL)
+        {
+            LOG("SPI_CMD_SET_CHANNEL\n");
+          
+            SPI_Set_Channel_Header& header = *reinterpret_cast<SPI_Set_Channel_Header*>(s_spi_rx_buffer);
+            header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+          
+            LOG("Setting channel: %d\n", (int)header.channel);
+            if (esp_wifi_set_channel(header.channel, WIFI_SECOND_CHAN_NONE) != ESP_OK)
+            {
+                LOG("Failed to set channel %d", (int)header.channel);
+                goto error;
+            }
+            setup_spi_idle_transfer(true);
+            goto done;
+        }
+        else if (command == SPI_Command::SPI_CMD_GET_CHANNEL)
+        {
+            LOG("SPI_CMD_GET_RATE\n");
+          
+            base_header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&base_header), sizeof(base_header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+            goto error;
+        }
+        else if (command == SPI_Command::SPI_CMD_SET_POWER)
+        {
+            LOG("SPI_CMD_SET_POWER\n");
+          
+            SPI_Set_Power_Header& header = *reinterpret_cast<SPI_Set_Power_Header*>(s_spi_rx_buffer);
+            header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+    
+            float power = static_cast<float>(header.power) / 10.f - 100.f;
+            if (set_wlan_power_dBm(power) != ESP_OK)
+            {
+                LOG("Failed to set power %f", power);
+                goto error;
+            }
+            LOG("Setting power: %f\n", get_wlan_power_dBm());
+            setup_spi_idle_transfer(true);
+            goto done;
+        }
+        else if (command == SPI_Command::SPI_CMD_GET_POWER)
+        {
+            LOG("SPI_CMD_GET_POWER\n");
+          
+            base_header.crc = 0;
+            uint8_t computed_crc = crc8_le(0, reinterpret_cast<const uint8_t*>(&base_header), sizeof(base_header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+            goto error;
+        }
+        else if (command == SPI_Command::SPI_CMD_GET_STATS)
+        {
+            LOG("Get stats\n");
+            uint32_t data[8] = { 0 };
+            memcpy(data, &s_stats, sizeof(Stats));
+            //    spi_slave_set_data(data);
+            goto error;
         }
         else
         {
-            //      spi_slave_set_status(0);
+            LOG("Unknown command: %d\n", command);
         }
-*/
-        setup_spi_idle_transfer();
-        return;
     }
-
-    if (command == SPI_Command::SPI_CMD_SET_RATE)
-    {
-        uint32_t rate = status & 0xFFFF;
-        LOG("Setting rate: %d\n", rate);
-        /*    if (rate >= sizeof(s_rate_mapping) || wifi_set_user_fixed_rate(FIXED_RATE_MASK_ALL, s_rate_mapping[rate]) != 0)
-    {
-      LOG("Failed to set rate %d", rate);
-      s_stats.spi_error_count++;
-    }
-*/  }
-    else if (command == SPI_Command::SPI_CMD_GET_RATE)
-    {
-        LOG("Get rate\n");
-        uint8_t enable_mask = 0;
-        uint8_t rate = 0;
-        /*    if (wifi_get_user_fixed_rate(&enable_mask, &rate) == 0)
-    {
-      uint16_t mapped_rate = 0xFFFF;
-      for (uint16_t i = 0; i < sizeof(s_rate_mapping); i++)
-      {
-        if (rate == s_rate_mapping[i])
-        {
-          mapped_rate = i;
-          break;
-        }
-      }
-      if (mapped_rate == 0xFFFF)
-      {
-        LOG("Cannot map hardware rate %d", rate);
-      }
-      spi_slave_set_status((SPI_Command::SPI_CMD_GET_RATE << 24) | mapped_rate);
-    }
-    else
-    {
-      LOG("Cannot get rate");
-      s_stats.spi_error_count++;
-    }
-*/  }
-    else if (command == SPI_Command::SPI_CMD_SET_CHANNEL)
-    {
-        uint32_t channel = status & 0xFFFF;
-        LOG("Setting channel: %d\n", channel);
-        /*    if (channel == 0 || channel > 11 || !wifi_set_channel(channel))
-    {
-      LOG("Cannot set channel %d", channel);
-      s_stats.spi_error_count++;
-    }
-*/  }
-    else if (command == SPI_Command::SPI_CMD_GET_CHANNEL)
-    {
-      LOG("Get channel\n");
-        //    uint8_t channel = wifi_get_channel();
-        //    spi_slave_set_status((SPI_Command::SPI_CMD_GET_CHANNEL << 24) | channel);
-    }
-    else if (command == SPI_Command::SPI_CMD_SET_POWER)
-    {
-        uint16_t power = status & 0xFFFF;
-        float dBm = (static_cast<float>(power) - 32767.f) / 100.f;
-        LOG("Setting power: %f\n", dBm);
-        set_wlan_power_dBm (dBm);
-    }
-    else if (command == SPI_Command::SPI_CMD_GET_POWER)
-    {
-        LOG("Get power\n");
-        float dBm = get_wlan_power_dBm();
-        uint16_t power = static_cast<uint16_t>(std::max(std::min((dBm * 100.f), 32767.f), -32767.f) + 32767.f);
-        //    spi_slave_set_status((SPI_Command::SPI_CMD_GET_POWER << 24) | power);
-    }
-    else if (command == SPI_Command::SPI_CMD_GET_STATS)
-    {
-        LOG("Get stats\n");
-        uint32_t data[8] = { 0 };
-        memcpy(data, &s_stats, sizeof(Stats));
-        //    spi_slave_set_data(data);
-    }
-    else
-    {
-        LOG("Unknown command: %d\n", command);
-    }
-
-      setup_spi_idle_transfer();
     
-    //s_stats.spi_status_received++;
+error:
+    s_stats.spi_error_count++;
+    setup_spi_idle_transfer(false);
+
+done:
+  ;
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -939,60 +829,71 @@ void setup()
 
     ESP_ERROR_CHECK(init_spi());
 
-    setup_spi_idle_transfer();
+    setup_spi_idle_transfer(true);
 
-    //ESP_ERROR_CHECK( esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, 0) );
+    ESP_ERROR_CHECK( esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE) );
 
-    //  ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(packet_received_cb));
-    //  ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
+    wifi_promiscuous_filter_t filter = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filter));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(packet_received_cb));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
 
-    set_wlan_power_dBm(20.5f);
+    //set_wlan_power_dBm(20.5f);
 
-    //esp_log_level_set("*", ESP_LOG_NONE);
+    esp_log_level_set("*", ESP_LOG_NONE);
 
-    set_wifi_fixed_rate(31);
+    set_wifi_fixed_rate(30);
 
-    //S012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+    //S012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789cacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca
+    
 
     Serial.printf("Initialized\n");
 }
 
-void loop() 
+IRAM_ATTR void loop() 
 {
     parse_command();
 
     //send pending wlan packets
-    if (!s_wlan_packet.ptr)
+    Wlan_Outgoing_Packet p;
+    if (!s_outgoing_wlan_packet.ptr)
     {
-        S2W_Packet p;
+        lock_guard lg;
+        if (!s_outgoing_wlan_packet.ptr)
         {
-            lock_guard lg;
-            if (!s_wlan_packet.ptr)
+            start_reading_wlan_outgoing_packet(s_outgoing_wlan_packet);
+            p = s_outgoing_wlan_packet;
+            if (p.ptr)
             {
-                start_reading_s2w_packet(s_wlan_packet);
-                p = s_wlan_packet;
+              memcpy(p.ptr, s_wlan_packet_header, WLAN_HEADER_SIZE);
             }
         }
+    }
+    else
+    {
+      p = s_outgoing_wlan_packet;
+    }
 
-        if (p.ptr)
+    if (p.ptr)
+    {
+        esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, p.ptr, WLAN_HEADER_SIZE + p.size, false);
+        if (res == ESP_OK)
         {
-            memcpy(p.ptr, s_wlan_packet_header, WLAN_HEADER_SIZE);
-            esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, p.ptr, WLAN_HEADER_SIZE + p.size, false);
-            if (res == ESP_OK)
-            {
-                s_stats.wlan_data_sent += s_wlan_packet.size;
-                set_status_led_on();
-                LOG("WLAN inject OKKK\n");
-            }
-            else
-            {
-                LOG("WLAN inject error: %d\n", res);
-                s_stats.wlan_error_count++;
-            }
-            {
-                lock_guard lg;
-                end_reading_s2w_packet(s_wlan_packet);
-            }
+            //delay(15);
+            s_stats.wlan_data_sent += s_outgoing_wlan_packet.size;
+            set_status_led_on();
+            //LOG("WLAN inject OKKK\n");
+            lock_guard lg;
+            end_reading_wlan_outgoing_packet(s_outgoing_wlan_packet);
+        }
+        else
+        {
+            //LOG("WLAN inject error: %d\n", res);
+            s_stats.wlan_error_count++;
+            lock_guard lg;
+            cancel_reading_wlan_outgoing_packet(s_outgoing_wlan_packet);
         }
     }
 
@@ -1000,9 +901,7 @@ void loop()
 
     {
         spi_slave_transaction_t* qt = nullptr;
-        esp_err_t err = spi_slave_get_trans_result(VSPI_HOST, &qt, portMAX_DELAY);
-        ESP_ERROR_CHECK(err);
-
+        esp_err_t err = spi_slave_get_trans_result(VSPI_HOST, &qt, 0);
         if (qt)
         {
             process_spi_transaction(qt);
@@ -1012,17 +911,17 @@ void loop()
             //xxx[qt->length / 8] = 0;
             //static int xxx = 0;
             //xxx++;
-            s_stats.spi_data_received += qt->length / 8;
+            //s_stats.spi_data_received += qt->trans_len / 8;
             //LOG("SPI confirmed %d: %d: %s\n", (int)qt->user, qt->length / 8, xxx);
         }
     }
 
-    /*  if (s_wlan_packet.ptr)
+  /*if (s_outgoing_wlan_packet.ptr)
   {
-    esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, s_wlan_packet.ptr, HEADER_SIZE + s_wlan_packet.size, false);
+    esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, s_outgoing_wlan_packet.ptr, HEADER_SIZE + s_outgoing_wlan_packet.size, false);
     if (res == ESP_OK)
     {
-      s_stats.wlan_data_sent += s_wlan_packet.size;
+      s_stats.wlan_data_sent += s_outgoing_wlan_packet.size;
       digitalWrite(LED_BUILTIN, LED_ON);
       //LOG("WLAN inject OKKK\n");
     }
@@ -1040,8 +939,8 @@ void loop()
         s_stats_last_tp = millis();
         //    Serial.printf("Sent: %d bytes ec:%d, Received: %d bytes, SPI SS: %d, SPI SR: %d, SPI DS: %d, SPI DR: %d, SPI ERR: %d, SPI PD: %d\n", s_sent, s_send_error_count, s_received, s_spi_status_sent, s_spi_status_received, s_spi_data_sent, s_spi_data_received, s_spi_error_count, s_spi_packets_dropped);
         Serial.printf("WLAN S: %d, R: %d, E: %d, D: %d, %%: %d  SPI S: %d, R: %d, E: %d, D: %d, %%: %d\n",
-                      s_stats.wlan_data_sent, s_stats.wlan_data_received, s_stats.wlan_error_count, s_stats.wlan_received_packets_dropped, s_s2w_queue.size() * 100 / s_s2w_queue.capacity(),
-                      s_stats.spi_data_sent, s_stats.spi_data_received, s_stats.spi_error_count, s_stats.spi_received_packets_dropped, s_w2s_queue.size() * 100 / s_w2s_queue.capacity());
+                      s_stats.wlan_data_sent, s_stats.wlan_data_received, s_stats.wlan_error_count, s_stats.wlan_received_packets_dropped, s_wlan_outgoing_queue.size() * 100 / s_wlan_outgoing_queue.capacity(),
+                      s_stats.spi_data_sent, s_stats.spi_data_received, s_stats.spi_error_count, s_stats.spi_received_packets_dropped, s_wlan_incoming_queue.size() * 100 / s_wlan_incoming_queue.capacity());
 
         s_stats = Stats();
 

@@ -27,8 +27,10 @@ public:
 
     static const size_t MAX_PAYLOAD_SIZE = 1374;
 
-    bool send_data(void const* data, size_t size);
-    bool receive_data(void* data, size_t& size, int& rssi);
+    bool send_data(size_t fec_channel, void const* data, size_t size);
+    bool receive_data(size_t fec_channel, void* data, size_t& size, int& rssi);
+
+    bool setup_fec_channel(size_t fec_channel, size_t coding_k, size_t coding_n, size_t mtu);
 
     enum class Rate
     {

@@ -95,6 +95,13 @@ bool Fec_Codec::init(const Descriptor& descriptor)
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+bool Fec_Codec::is_initialized() const
+{
+    return m_fec != nullptr;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+
 void Fec_Codec::set_data_encoded_cb(void (*cb)(void* data, size_t size))
 {
     m_encoder.cb = cb;
@@ -761,5 +768,109 @@ const Fec_Codec::Descriptor& Fec_Codec::get_descriptor() const
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+/*Fec_Codec s_fec_codec;
+size_t s_fec_encoded_data_size = 0;
+size_t s_fec_decoded_data_size = 0;
 
+void fec_encoded_cb(void* data, size_t size)
+{
+    s_fec_encoded_data_size += size;
+}
+void fec_decoded_cb(void* data, size_t size)
+{
+    s_fec_decoded_data_size += size;
+}
 
+void test_fec_encoding()
+{
+    s_fec_encoded_data_size = 0;
+    s_fec_decoded_data_size = 0;
+    s_fec_codec.set_data_encoded_cb(&fec_encoded_cb);
+    s_fec_codec.set_data_decoded_cb(&fec_decoded_cb);
+
+    LOG("starting test\n");
+
+    uint8_t data[128] = { 0 };
+
+    uint32_t start_tp = millis();
+
+    size_t iteration = 0;
+    size_t fec_data_in = 0;
+    //encode
+    while (millis() - start_tp < 1000)
+    {
+//        Serial.printf("Encoding %d\n", iteration);
+
+        if (!s_fec_codec.encode_data(data, sizeof(data), true))
+        {
+            Serial.printf("Failed to encode\n");
+            return;
+        }
+        fec_data_in += sizeof(data);
+        //LOG("Pass %d %dms\n", i, millis() - start_pass_tp);
+
+        iteration++;
+    }
+    float ds = 1.f;//d / 1000.f;
+    float total_data_in = fec_data_in / 1024.f;
+    float total_data_out = s_fec_encoded_data_size / 1024.f;
+    LOG("Total IN: %.2fKB, %.2fKB/s, OUT: %.2fKB, %.2fKB/s\n", total_data_in, total_data_in / ds, total_data_out, total_data_out / ds);
+}
+
+volatile size_t xxx = 0;
+void fec_encoded2_cb(void* data, size_t size)
+{
+    s_fec_encoded_data_size += size;
+
+    //if (rand() > RAND_MAX / 4)
+    xxx++;
+
+    size_t n = s_fec_codec.get_descriptor().coding_n;
+    if ((xxx % n) < n * 75 / 100)
+    {
+        s_fec_codec.decode_data(data, size, true);
+    }
+    else
+    {
+        //LOG("Skipped packet %d\n", xxx);
+    }
+}
+
+void test_fec_decoding()
+{
+    s_fec_encoded_data_size = 0;
+    s_fec_decoded_data_size = 0;
+    s_fec_codec.set_data_encoded_cb(&fec_encoded2_cb);
+    s_fec_codec.set_data_decoded_cb(&fec_decoded_cb);
+
+    LOG("starting test\n");
+
+    uint8_t data[128] = { 0 };
+
+    uint32_t start_tp = millis();
+
+    size_t iteration = 0;
+    size_t fec_data_in = 0;
+    //encode
+    while (millis() - start_tp < 1000)
+    {
+        //Serial.printf("Encoding %d\n", iteration);
+
+        if (!s_fec_codec.encode_data(data, sizeof(data), true))
+        {
+            Serial.printf("Failed to encode\n");
+            return;
+        }
+        fec_data_in += sizeof(data);
+        //LOG("Pass %d %dms\n", i, millis() - start_pass_tp);
+
+        iteration++;
+    }
+    float ds = 1.f;//d / 1000.f;
+    float total_data_in = fec_data_in / 1024.f;
+    float total_data_encoded = s_fec_encoded_data_size / 1024.f;
+    float total_data_decoded = s_fec_decoded_data_size / 1024.f;
+    LOG("Total IN: %.2fKB, %.2fKB/s, ENCODED: %.2fKB, %.2fKB/s, DECODED: %.2fKB, %.2fKB/s\n", total_data_in, total_data_in / ds, total_data_encoded, total_data_encoded / ds, total_data_decoded, total_data_decoded / ds);
+}
+
+*/

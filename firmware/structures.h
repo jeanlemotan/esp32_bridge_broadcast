@@ -12,12 +12,12 @@ constexpr uint8_t s_wlan_packet_header[] =
 };
 
 constexpr size_t WLAN_HEADER_SIZE = sizeof(s_wlan_packet_header);
-constexpr size_t MAX_WLAN_PACKET_SIZE = 1400;
-constexpr size_t MAX_WLAN_PAYLOAD_SIZE = MAX_WLAN_PACKET_SIZE - WLAN_HEADER_SIZE;
+constexpr size_t WLAN_MAX_PACKET_SIZE = 1400;
+constexpr size_t WLAN_MAX_PAYLOAD_SIZE = WLAN_MAX_PACKET_SIZE - WLAN_HEADER_SIZE;
 
 static_assert(WLAN_HEADER_SIZE == 24, "");
 
-struct S2W_Packet
+struct Wlan_Outgoing_Packet
 {
   uint8_t* ptr = nullptr;
   uint8_t* payload_ptr = nullptr;
@@ -25,7 +25,7 @@ struct S2W_Packet
   uint16_t offset = 0;
 };
 
-struct W2S_Packet
+struct Wlan_Incoming_Packet
 {
   uint8_t* ptr = nullptr;
   uint16_t size = 0;
@@ -35,11 +35,11 @@ struct W2S_Packet
 
 /////////////////////////////////////////////////////////////////////////
 
-constexpr size_t W2S_BUFFER_SIZE = 130;
-alignas(uint32_t) uint8_t s_w2s_buffer[W2S_BUFFER_SIZE];
+constexpr size_t WLAN_INCOMING_BUFFER_SIZE = 13000;
+alignas(uint32_t) uint8_t s_wlan_incoming_buffer[WLAN_INCOMING_BUFFER_SIZE];
 
-constexpr size_t S2W_BUFFER_SIZE = 130;
-alignas(uint32_t) uint8_t s_s2w_buffer[S2W_BUFFER_SIZE];
+constexpr size_t WLAN_OUTGOING_BUFFER_SIZE = 13000;
+alignas(uint32_t) uint8_t s_wlan_outgoing_buffer[WLAN_OUTGOING_BUFFER_SIZE];
 
 
 template<size_t N>
@@ -51,7 +51,7 @@ struct Queue
     //memset(m_buffer, 0, N);
   }
 
-  inline size_t size() const
+  IRAM_ATTR inline size_t size() const
   {
     if (m_read_start == m_write_start)
     {
@@ -67,12 +67,12 @@ struct Queue
     }
   }
 
-  inline size_t capacity() const
+  IRAM_ATTR inline size_t capacity() const
   {
     return N;
   }
 
-  inline uint8_t* start_writing(size_t size) __attribute__((always_inline))
+  IRAM_ATTR inline uint8_t* start_writing(size_t size) __attribute__((always_inline))
   {
     if (m_write_start != m_write_end)
     {
@@ -118,16 +118,16 @@ struct Queue
     }
   }
 
-  inline void end_writing() __attribute__((always_inline))
+  IRAM_ATTR inline void end_writing() __attribute__((always_inline))
   {
     m_write_start = m_write_end;
   }
-  inline void cancel_writing() __attribute__((always_inline))
+  IRAM_ATTR inline void cancel_writing() __attribute__((always_inline))
   {
     m_write_end = m_write_start;
   }
 
-  inline uint8_t* start_reading(size_t& size) __attribute__((always_inline))
+  IRAM_ATTR inline uint8_t* start_reading(size_t& size) __attribute__((always_inline))
   {
     if (m_read_start != m_read_end)
     {
@@ -150,17 +150,17 @@ struct Queue
     }
     else
     {
-      m_read_start = 0;
+      //m_read_start = 0;
       m_read_end = size;
       return m_buffer;
     }
   }
 
-  inline void end_reading() __attribute__((always_inline))
+  IRAM_ATTR inline void end_reading() __attribute__((always_inline))
   {
     m_read_start = m_read_end;
   }
-  inline void cancel_reading()  __attribute__((always_inline))
+  IRAM_ATTR inline void cancel_reading()  __attribute__((always_inline))
   {
     m_read_end = m_read_start;
   }
@@ -175,15 +175,15 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////////
 
-Queue<W2S_BUFFER_SIZE> s_w2s_queue(s_w2s_buffer);
-Queue<S2W_BUFFER_SIZE> s_s2w_queue(s_s2w_buffer);
+Queue<WLAN_INCOMING_BUFFER_SIZE> s_wlan_incoming_queue(s_wlan_incoming_buffer);
+Queue<WLAN_OUTGOING_BUFFER_SIZE> s_wlan_outgoing_queue(s_wlan_outgoing_buffer);
 
 ////////////////////////////////////////////////////////////////////////////////////
 
-bool start_writing_s2w_packet(S2W_Packet& packet, size_t size)
+IRAM_ATTR bool start_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet, size_t size)
 {
   size_t real_size = WLAN_HEADER_SIZE + size;
-  uint8_t* buffer = s_s2w_queue.start_writing(real_size);
+  uint8_t* buffer = s_wlan_outgoing_queue.start_writing(real_size);
   if (!buffer)
   {
     packet.ptr = nullptr;
@@ -195,21 +195,21 @@ bool start_writing_s2w_packet(S2W_Packet& packet, size_t size)
   packet.payload_ptr = buffer + WLAN_HEADER_SIZE;
   return true;
 }
-void end_writing_s2w_packet(S2W_Packet& packet)
+IRAM_ATTR void end_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
 {
-  s_s2w_queue.end_writing();
+  s_wlan_outgoing_queue.end_writing();
   packet.ptr = nullptr;
 }
-void cancel_writing_s2w_packet(S2W_Packet& packet)
+IRAM_ATTR void cancel_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
 {
-  s_s2w_queue.cancel_writing();
+  s_wlan_outgoing_queue.cancel_writing();
   packet.ptr = nullptr;
 }
 
-bool start_reading_s2w_packet(S2W_Packet& packet)
+IRAM_ATTR bool start_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
 {
   size_t real_size = 0;
-  uint8_t* buffer = s_s2w_queue.start_reading(real_size);
+  uint8_t* buffer = s_wlan_outgoing_queue.start_reading(real_size);
   if (!buffer)
   {
     packet.ptr = nullptr;
@@ -221,22 +221,22 @@ bool start_reading_s2w_packet(S2W_Packet& packet)
   packet.payload_ptr = buffer + WLAN_HEADER_SIZE;
   return true;
 }
-void end_reading_s2w_packet(S2W_Packet& packet)
+IRAM_ATTR void end_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
 {
-  s_s2w_queue.end_reading();
+  s_wlan_outgoing_queue.end_reading();
   packet.ptr = nullptr;
 }
-void cancel_reading_s2w_packet(S2W_Packet& packet)
+IRAM_ATTR void cancel_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
 {
-  s_s2w_queue.cancel_reading();
+  s_wlan_outgoing_queue.cancel_reading();
   packet.ptr = nullptr;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////
 
-bool start_writing_w2s_packet(W2S_Packet& packet, size_t size)
+IRAM_ATTR bool start_writing_wlan_incoming_packet(Wlan_Incoming_Packet& packet, size_t size)
 {
-  uint8_t* buffer = s_w2s_queue.start_writing(size);
+  uint8_t* buffer = s_wlan_incoming_queue.start_writing(size);
   if (!buffer)
   {
     packet.ptr = nullptr;
@@ -247,21 +247,21 @@ bool start_writing_w2s_packet(W2S_Packet& packet, size_t size)
   packet.ptr = buffer;
   return true;
 }
-void end_writing_w2s_packet(W2S_Packet& packet)
+IRAM_ATTR void end_writing_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
 {
-  s_w2s_queue.end_writing();
+  s_wlan_incoming_queue.end_writing();
   packet.ptr = nullptr;
 }
-void cancel_writing_w2s_packet(W2S_Packet& packet)
+IRAM_ATTR void cancel_writing_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
 {
-  s_w2s_queue.cancel_writing();
+  s_wlan_incoming_queue.cancel_writing();
   packet.ptr = nullptr;
 }
 
-bool start_reading_w2s_packet(W2S_Packet& packet)
+IRAM_ATTR bool start_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
 {
   size_t size = 0;
-  uint8_t* buffer = s_w2s_queue.start_reading(size);
+  uint8_t* buffer = s_wlan_incoming_queue.start_reading(size);
   if (!buffer)
   {
     packet.ptr = nullptr;
@@ -272,14 +272,14 @@ bool start_reading_w2s_packet(W2S_Packet& packet)
   packet.ptr = buffer;
   return true;
 }
-void end_reading_w2s_packet(W2S_Packet& packet)
+IRAM_ATTR void end_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
 {
-  s_w2s_queue.end_reading();
+  s_wlan_incoming_queue.end_reading();
   packet.ptr = nullptr;
 }
-void cancel_reading_w2s_packet(W2S_Packet& packet)
+IRAM_ATTR void cancel_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
 {
-  s_w2s_queue.cancel_reading();
+  s_wlan_incoming_queue.cancel_reading();
   packet.ptr = nullptr;
 }
 
