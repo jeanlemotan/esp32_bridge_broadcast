@@ -51,6 +51,26 @@ struct Queue
     //memset(m_buffer, 0, N);
   }
 
+  IRAM_ATTR inline size_t count() const
+  {
+    return m_count;
+  }
+
+  IRAM_ATTR inline size_t next_reading_size()
+  {
+    if (m_read_start != m_read_end)
+    {
+      return 0;
+    }
+    if (m_read_start == m_write_start)
+    {
+      return 0;
+    }
+    size_t size;
+    memcpy(&size, m_buffer + m_read_start, sizeof(uint32_t)); //read the size
+    return size;
+  }
+
   IRAM_ATTR inline size_t size() const
   {
     if (m_read_start == m_write_start)
@@ -121,6 +141,7 @@ struct Queue
   IRAM_ATTR inline void end_writing() __attribute__((always_inline))
   {
     m_write_start = m_write_end;
+    m_count++;
   }
   IRAM_ATTR inline void cancel_writing() __attribute__((always_inline))
   {
@@ -159,6 +180,8 @@ struct Queue
   IRAM_ATTR inline void end_reading() __attribute__((always_inline))
   {
     m_read_start = m_read_end;
+    assert(m_count > 0);
+    m_count--;
   }
   IRAM_ATTR inline void cancel_reading()  __attribute__((always_inline))
   {
@@ -171,6 +194,7 @@ private:
   size_t m_write_end = 0;
   size_t m_read_start = 0;
   size_t m_read_end = 0;
+  size_t m_count = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////

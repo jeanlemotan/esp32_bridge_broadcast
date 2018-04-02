@@ -310,7 +310,7 @@ void Fec_Codec::static_decoder_task_proc(void* params)
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-void Fec_Codec::encoder_task_proc()
+IRAM_ATTR void Fec_Codec::encoder_task_proc()
 {
     while (true)
     {
@@ -387,7 +387,7 @@ void Fec_Codec::encoder_task_proc()
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-bool Fec_Codec::encode_data(const void* _data, size_t size, bool block)
+IRAM_ATTR bool Fec_Codec::encode_data(const void* _data, size_t size, bool block)
 {
     if (!m_encoder.task)
     {
@@ -440,7 +440,7 @@ bool Fec_Codec::encode_data(const void* _data, size_t size, bool block)
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-bool Fec_Codec::decode_data(const void* _data, size_t size, bool block)
+IRAM_ATTR bool Fec_Codec::decode_data(const void* _data, size_t size, bool block)
 {
     if (!m_decoder.task)
     {

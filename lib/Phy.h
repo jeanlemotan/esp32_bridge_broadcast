@@ -27,10 +27,10 @@ public:
 
     static const size_t MAX_PAYLOAD_SIZE = 1374;
 
-    bool send_data(size_t fec_channel, void const* data, size_t size);
-    bool receive_data(size_t fec_channel, void* data, size_t& size, int& rssi);
+    bool send_data(void const* data, size_t size);
+    bool receive_data(void* data, size_t& size, int& rssi);
 
-    bool setup_fec_channel(size_t fec_channel, size_t coding_k, size_t coding_n, size_t mtu);
+    bool setup_fec_channel(size_t coding_k, size_t coding_n, size_t mtu);
 
     enum class Rate
     {
@@ -95,6 +95,8 @@ public:
     bool get_stats(Stats& stats);
 
 private:
+    template<typename Req, typename Res>
+    void prepare_transfer_buffers(size_t payload_size);
     bool transfer(void const* tx_data, void* rx_data, size_t size);
     uint32_t get_status();
     bool send_command(uint32_t command);
@@ -102,11 +104,17 @@ private:
 
     std::mutex m_mutex;
 
+    std::vector<uint8_t> m_tx_buffer;
+    std::vector<uint8_t> m_rx_buffer;
+
     size_t m_speed = 0;
     size_t m_comms_delay = 0;
 
     int m_pigpio_fd = -1;
     int m_dev_fd = -1;
+
+    uint32_t m_pending_packets = 0;
+    uint32_t m_next_packet_size = 0;
 
     static const size_t MAX_TRANSFERS = 64;
 

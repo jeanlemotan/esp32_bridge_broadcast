@@ -58,7 +58,8 @@ DESTDIR = ../../bin
 HEADERS += \
     ../../../lib/Phy.h \
     ../../../lib/utils/pigpio.h \
-    ../../../lib/utils/command.h
+    ../../../lib/utils/command.h \
+    ../../../firmware/spi_comms.h
 
 SOURCES += \
     ../../main.cpp \

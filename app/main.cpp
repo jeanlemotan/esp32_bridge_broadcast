@@ -24,8 +24,8 @@ bool s_use_spi_dev = true;
 std::string s_spi_dev = "/dev/spidev0.0";
 size_t s_pigpio_spi_port = 0;
 size_t s_pigpio_spi_channel = 0;
-size_t s_spi_speed = 4000000;
-size_t s_spi_delay = 20;
+size_t s_spi_speed = 10000000;
+size_t s_spi_delay = 0;
 Phy::Rate s_phy_rate = Phy::Rate::RATE_B_5_5M_CCK;
 float s_phy_power = 20.5f;
 uint8_t s_phy_channel = 1;
@@ -258,7 +258,7 @@ int run(Phy& phy)
         if (Clock::now() - last_receive_tp >= std::chrono::microseconds(500))
         {
             last_receive_tp = Clock::now();
-            if (phy.receive_data(0, rx_data.data(), rx_data_size, rx_rssi))
+            if (phy.receive_data(rx_data.data(), rx_data_size, rx_rssi))
             {
                 std::cout.write(reinterpret_cast<const char*>(rx_data.data()), rx_data_size);
                 if (s_flush)
@@ -272,7 +272,7 @@ int run(Phy& phy)
             int res = read(STDIN_FILENO, tx_data.data(), s_mtu);
             if (res > 0)
             {
-                phy.send_data(0, tx_data.data(), res);
+                phy.send_data(tx_data.data(), res);
             }
         }
     }
