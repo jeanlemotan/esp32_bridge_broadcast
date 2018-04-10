@@ -445,6 +445,29 @@ void parse_command()
 
 /////////////////////////////////////////////////////////////////////////
 
+IRAM_ATTR void fec_encoded_cb(void* data, size_t size)
+{
+    Wlan_Outgoing_Packet packet;
+    start_writing_wlan_outgoing_packet(packet, size);
+    if (!packet.ptr)
+    {
+        //LOG("Sending failed: previous packet still in flight\n");
+        return;
+    }
+    //LOG("Sending %d\n", size);
+    
+    memcpy(packet.payload_ptr, data, size);
+    
+    //LOG("Sending packet of size %d\n", packet.size);
+    end_writing_wlan_outgoing_packet(packet);
+}
+
+IRAM_ATTR void fec_decoded_cb(void* data, size_t size)
+{
+}
+
+/////////////////////////////////////////////////////////////////////////
+
 uint8_t* s_spi_tx_buffer = nullptr;
 uint8_t* s_spi_rx_buffer = nullptr;
 uint8_t* s_spi_rx_payload_ptr = nullptr;
@@ -501,9 +524,9 @@ esp_err_t init_spi()
     return spi_slave_initialize(VSPI_HOST, &bus_config, &slave_config, 1);
 }
 
-IRAM_ATTR void setup_spi_response(SPI_Base_Response* response, size_t size,const void* payload_ptr, size_t payload_size, bool last_command_ok)
+IRAM_ATTR void setup_spi_response(SPI_Base_Response_Header* response, size_t size, const void* payload_ptr, size_t payload_size, bool last_command_ok)
 {
-    assert(size >= sizeof(SPI_Base_Response) && size <= MAX_SPI_BUFFER_SIZE);
+    assert(size >= sizeof(SPI_Base_Response_Header) && size <= MAX_SPI_BUFFER_SIZE);
     
     static spi_slave_transaction_t t;
     memset(&t, 0, sizeof(t));
@@ -529,9 +552,10 @@ IRAM_ATTR void setup_spi_response(SPI_Base_Response* response, size_t size,const
 }
 
 
-IRAM_ATTR void setup_spi_base_response(bool last_command_ok)
+IRAM_ATTR void setup_spi_base_response(uint8_t seq, bool last_command_ok)
 {
-    SPI_Base_Response response;
+    SPI_Base_Response_Header response;
+    response.seq = seq & 0x7F;
     setup_spi_response(&response, sizeof(response), nullptr, 0, last_command_ok);
 }
 
@@ -586,7 +610,7 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 LOG("Fec codec busy\n");
                 goto error;
             }
-            setup_spi_base_response(true);
+            setup_spi_base_response(header.seq, true);
             goto done;
         }
     
@@ -618,8 +642,10 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 LOG("Failed to init fec codec");
                 goto error;
             }
+            s_fec_codec.set_data_encoded_cb(&fec_encoded_cb);
+            s_fec_codec.set_data_decoded_cb(&fec_decoded_cb);
             
-            setup_spi_base_response(true);
+            setup_spi_base_response(header.seq, true);
             goto done;
         }
     
@@ -644,8 +670,9 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
             }
 
             SPI_Get_Packet_Response_Header response;
+            response.seq = header.seq & 0x7F;
             response.rssi = packet.rssi;
-            setup_spi_response(&response, sizeof(SPI_Base_Response), packet.ptr, packet.size, true);
+            setup_spi_response(&response, sizeof(SPI_Base_Response_Header), packet.ptr, packet.size, true);
             goto done;
         }
     
@@ -668,7 +695,7 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 LOG("Failed to set rate %d", (int)header.rate);
                 goto error;
             }
-            setup_spi_base_response(true);
+            setup_spi_base_response(header.seq, true);
             goto done;
         }
         else if (command == SPI_Command::SPI_CMD_GET_RATE)
@@ -684,6 +711,7 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
             }
 
             SPI_Get_Rate_Response_Header response;
+            response.seq = base_header.seq & 0x7F;
             response.rate = get_wifi_fixed_rate();
             setup_spi_response(&response, sizeof(response), nullptr, 0, true);
             goto done;
@@ -707,7 +735,7 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 LOG("Failed to set channel %d", (int)header.channel);
                 goto error;
             }
-            setup_spi_base_response(true);
+            setup_spi_base_response(header.seq, true);
             goto done;
         }
         else if (command == SPI_Command::SPI_CMD_GET_CHANNEL)
@@ -722,6 +750,7 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 goto error;
             }
             SPI_Get_Channel_Response_Header response;
+            response.seq = base_header.seq & 0x7F;
             response.channel = 0;
             setup_spi_response(&response, sizeof(response), nullptr, 0, true);
             goto done;
@@ -746,7 +775,7 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 goto error;
             }
             LOG("Setting power: %f (real %f)\n", power, get_wlan_power_dBm());
-            setup_spi_base_response(true);
+            setup_spi_base_response(header.seq, true);
             goto done;
         }
         else if (command == SPI_Command::SPI_CMD_GET_POWER)
@@ -761,17 +790,25 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 goto error;
             }
             SPI_Get_Power_Response_Header response;
+            response.seq = base_header.seq & 0x7F;
             response.power = static_cast<uint16_t>((get_wlan_power_dBm() + 100.f) * 10.f);
             setup_spi_response(&response, sizeof(response), nullptr, 0, true);
             goto done;
         }
-        else if (command == SPI_Command::SPI_CMD_GET_STATS)
+        else if (command == SPI_Command::SPI_CMD_QUERY)
         {
-            LOG("Get stats\n");
-            uint32_t data[8] = { 0 };
-            memcpy(data, &s_stats, sizeof(Stats));
-            //    spi_slave_set_data(data);
-            goto error;
+            //LOG("SPI_CMD_QUERY\n");
+            base_header.crc = 0;
+            uint8_t computed_crc = crc8(0, reinterpret_cast<const uint8_t*>(&base_header), sizeof(base_header));
+            if (crc != computed_crc)
+            {
+                LOG("Crc error: %d != %d\n", crc, computed_crc);
+                goto error;
+            }
+            SPI_Query_Response_Header response;
+            response.seq = base_header.seq & 0x7F;
+            setup_spi_response(&response, sizeof(response), nullptr, 0, true);
+            goto done;            
         }
         else
         {
@@ -781,20 +818,10 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
     
 error:
     s_stats.spi_error_count++;
-    setup_spi_base_response(false);
+    setup_spi_base_response(0, false);
 
 done:
   ;
-}
-
-/////////////////////////////////////////////////////////////////////////
-
-IRAM_ATTR void fec_encoded_cb(void* data, size_t size)
-{
-}
-
-IRAM_ATTR void fec_decoded_cb(void* data, size_t size)
-{
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -818,9 +845,6 @@ void setup()
 
     Serial.printf("Initializing...\n");
 
-    s_fec_codec.set_data_encoded_cb(&fec_encoded_cb);
-    s_fec_codec.set_data_decoded_cb(&fec_decoded_cb);
-    
 /*    Fec_Codec::Descriptor descriptor;
     descriptor.mtu = 1400;
     //descriptor.encoder_core = Fec_Codec::Core::Core_1;
@@ -874,7 +898,7 @@ void setup()
 
     ESP_ERROR_CHECK(init_spi());
 
-    setup_spi_base_response(true);
+    setup_spi_base_response(0, true);
 
     ESP_ERROR_CHECK( esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE) );
 

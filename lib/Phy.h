@@ -7,6 +7,8 @@
 #include <mutex>
 #include <linux/spi/spidev.h>
 
+class SPI_Query_Response_Header;
+
 class Phy
 {
 public:
@@ -98,14 +100,14 @@ private:
     template<typename Req, typename Res>
     void prepare_transfer_buffers(size_t payload_size);
     bool transfer(void const* tx_data, void* rx_data, size_t size);
-    uint32_t get_status();
-    bool send_command(uint32_t command);
-    bool get_data();
+
+    bool query(SPI_Query_Response_Header& query);
 
     std::mutex m_mutex;
 
     std::vector<uint8_t> m_tx_buffer;
     std::vector<uint8_t> m_rx_buffer;
+    uint8_t m_seq = 0;
 
     size_t m_speed = 0;
     size_t m_comms_delay = 0;

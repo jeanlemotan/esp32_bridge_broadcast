@@ -39,7 +39,7 @@ public:
     };
 
     bool init(const Descriptor& descriptor);
-    bool is_initialized() const;
+    IRAM_ATTR bool is_initialized() const;
 
     const Descriptor& get_descriptor() const;
 
@@ -50,7 +50,7 @@ public:
     //Add here data that will be encoded.
     //Size dosn't have to be a full packet. Can be anything > 0, even bigger than a packet
     //NOTE: This has to be called from a single thread only (any thread, as long as it's just one)
-    bool encode_data(const void* data, size_t size, bool block);
+    IRAM_ATTR bool encode_data(const void* data, size_t size, bool block);
 
     //Callback for when a decoded packet is ready.
     //NOTE: this is called form another thread!!!
@@ -59,7 +59,7 @@ public:
     //Add here data that will be decoded.
     //Size dosn't have to be a full packet. Can be anything > 0, even bigger than a packet
     //NOTE: This has to be called from a single thread only (any thread, as long as it's just one)
-    bool decode_data(const void* data, size_t size, bool block);
+    IRAM_ATTR bool decode_data(const void* data, size_t size, bool block);
 
 private:
     void stop_tasks();

@@ -10,6 +10,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <cassert>
+#include <thread>
 #include "../firmware/spi_comms.h"
 
 static const size_t CHUNK_SIZE = 1024;
@@ -267,32 +268,6 @@ bool Phy::transfer(void const* tx_data, void* rx_data, size_t size)
 
 //////////////////////////////////////////////////////////////////////////////
 
-uint32_t Phy::get_status()
-{
-    std::array<uint8_t, 5> tx = { 0x4, 0x0 };
-    std::array<uint8_t, 5> rx = { 0x0 };
-
-    transfer(tx.data(), rx.data(), tx.size());
-
-    uint32_t res;
-    memcpy(&res, rx.data() + 1, 4);
-
-    return res;
-}
-
-//////////////////////////////////////////////////////////////////////////////
-
-bool Phy::send_command(uint32_t command)
-{
-    std::array<uint8_t, 5> tx = { 0x1, 0x0 };
-
-    memcpy(tx.data() + 1, &command, 4);
-
-    return transfer(tx.data(), nullptr, tx.size());
-}
-
-//////////////////////////////////////////////////////////////////////////////
-
 template<typename Req, typename Res>
 void Phy::prepare_transfer_buffers(size_t payload_size)
 {
@@ -318,35 +293,49 @@ bool Phy::send_data(void const* data, size_t size)
 
     std::lock_guard<std::mutex> lg(m_mutex);
 
-    prepare_transfer_buffers<SPI_Send_Packet_Header, SPI_Base_Response>(size);
-    SPI_Send_Packet_Header& header = *reinterpret_cast<SPI_Send_Packet_Header*>(m_tx_buffer.data());
-    memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_SEND_PACKET;
-    header.size = size;
-    header.flush = false;
-    header.crc = crc8(0, &header, sizeof(header));
-    memcpy(m_tx_buffer.data() + sizeof(header), data, size);
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Send_Packet_Header, SPI_Base_Response_Header>(size);
+        SPI_Send_Packet_Header& header = *reinterpret_cast<SPI_Send_Packet_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_SEND_PACKET;
+        header.seq = seq;
+        header.size = size;
+        header.flush = false;
+        header.crc = crc8(0, &header, sizeof(header));
+        memcpy(m_tx_buffer.data() + sizeof(header), data, size);
 
-    if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(300)); //needed to avoid spi errors due to the esp not being ready quickly enough
+
+        SPI_Base_Response_Header& response = *reinterpret_cast<SPI_Base_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+
+        if (response.last_command_ok == 0)
+        {
+            return false;
+        }
+    }
+    SPI_Query_Response_Header q;
+    if (!query(q))
     {
         return false;
     }
-
-    SPI_Base_Response& response = *reinterpret_cast<SPI_Base_Response*>(m_rx_buffer.data());
-    uint8_t response_crc = response.crc;
-    response.crc = 0;
-    uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
-    if (response_crc != response_computed_crc)
+    if (q.last_command_ok == 0 || q.seq != seq)
     {
         return false;
     }
-
-    if (response.last_command_ok == 0)
-    {
-        return false;
-    }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
     return true;
 }
 
@@ -360,72 +349,6 @@ bool Phy::receive_data(void* data, size_t& size, int& rssi)
     size = 0;
     rssi = 0;
 
-    uint32_t command = SPI_Command::SPI_CMD_GET_PACKET << 24;
-    if (!send_command(command))
-    {
-        return false;
-    }
-
-    uint32_t status = get_status();
-    if ((status >> 24) != SPI_Command::SPI_CMD_GET_PACKET)
-    {
-        return false;
-    }
-
-    uint8_t urssi = (status >> 16) & 0xFF;
-    rssi = reinterpret_cast<int8_t&>(urssi);
-    size = std::min<uint32_t>(status & 0xFFFF, MAX_PACKET_SIZE);
-    if (size < 2)
-    {
-        size = 0;
-        return false;
-    }
-
-    uint32_t crc = 0;
-
-    uint8_t tx[CHUNK_SIZE + 2];
-    uint8_t rx[CHUNK_SIZE + 2];
-    tx[0] = 0x3;
-    tx[1] = 0x0;
-
-    uint8_t* data_ptr = reinterpret_cast<uint8_t*>(data);
-    size_t left = size;
-    while (left > 0)
-    {
-        size_t chunk_size = std::min(CHUNK_SIZE, left);
-        if (!transfer(tx, rx, CHUNK_SIZE + 2)) //always do complete transactions
-        {
-            return false;
-        }
-
-        uint8_t const* src_ptr = rx + 2; //these 2 bytes are the spi commands
-        if (left == size) //consume the crc first
-        {
-            memcpy(&crc, src_ptr, 2);
-            src_ptr += 2;
-            chunk_size = std::min(CHUNK_SIZE - 2, left);
-        }
-        memcpy(data_ptr, src_ptr, chunk_size);
-        left -= chunk_size;
-        data_ptr += chunk_size;
-    }
-
-    size -= 2; //ythe first 2 bytes are the crc
-
-    //the first 2 bytes are the crc
-    uint16_t computed_crc = crc16(0, data, size);
-    if (crc != computed_crc)
-    {
-        //        for (size_t i = 0; i < size; i++)
-        //        {
-        //            printf("%02X,", ((uint8_t const*)data)[i]);
-        //        }
-        //std::cout << "CRC for size " << std::to_string(size) << " is " << std::to_string(crc) << " \n";
-        size = 0;
-        return false;
-    }
-
-    //    std::cout << "Incoming " << std::to_string(status) << " " << std::to_string(size) << "\n";
     return true;
 }
 
@@ -435,34 +358,43 @@ bool Phy::set_rate(Rate rate)
 {
     std::lock_guard<std::mutex> lg(m_mutex);
 
-    prepare_transfer_buffers<SPI_Set_Rate_Header, SPI_Base_Response>(0);
-    SPI_Set_Rate_Header& header = *reinterpret_cast<SPI_Set_Rate_Header*>(m_tx_buffer.data());
-    memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_SET_RATE;
-    header.rate = static_cast<uint8_t>(rate);
-    header.crc = crc8(0, &header, sizeof(header));
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Set_Rate_Header, SPI_Base_Response_Header>(0);
+        SPI_Set_Rate_Header& header = *reinterpret_cast<SPI_Set_Rate_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_SET_RATE;
+        header.seq = seq;
+        header.rate = static_cast<uint8_t>(rate);
+        header.crc = crc8(0, &header, sizeof(header));
 
-    if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        gpioDelay(COMMAND_DELAY_US);
+
+        SPI_Base_Response_Header& response = *reinterpret_cast<SPI_Base_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+    }
+
+    SPI_Query_Response_Header q;
+    if (!query(q))
     {
         return false;
     }
-    gpioDelay(COMMAND_DELAY_US);
-
-    SPI_Base_Response& response = *reinterpret_cast<SPI_Base_Response*>(m_rx_buffer.data());
-    uint8_t response_crc = response.crc;
-    response.crc = 0;
-    uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
-    if (response_crc != response_computed_crc)
+    if (q.last_command_ok == 0 || q.seq != seq)
     {
         return false;
     }
-
-    if (response.last_command_ok == 0)
-    {
-        return false;
-    }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
     return true;
 }
 
@@ -472,34 +404,43 @@ bool Phy::get_rate(Rate& rate)
 {
     std::lock_guard<std::mutex> lg(m_mutex);
 
-    prepare_transfer_buffers<SPI_Get_Rate_Header, SPI_Get_Rate_Response_Header>(0);
-    SPI_Get_Rate_Header& header = *reinterpret_cast<SPI_Get_Rate_Header*>(m_tx_buffer.data());
-    memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_GET_RATE;
-    header.crc = crc8(0, &header, sizeof(header));
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Get_Rate_Header, SPI_Get_Rate_Response_Header>(0);
+        SPI_Get_Rate_Header& header = *reinterpret_cast<SPI_Get_Rate_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_GET_RATE;
+        header.seq = seq;
+        header.crc = crc8(0, &header, sizeof(header));
 
-    if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        gpioDelay(COMMAND_DELAY_US);
+
+        SPI_Get_Rate_Response_Header& response = *reinterpret_cast<SPI_Get_Rate_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+
+        rate = static_cast<Rate>(response.rate);
+    }
+    SPI_Query_Response_Header q;
+    if (!query(q))
     {
         return false;
     }
-    gpioDelay(COMMAND_DELAY_US);
-
-    SPI_Get_Rate_Response_Header& response = *reinterpret_cast<SPI_Get_Rate_Response_Header*>(m_rx_buffer.data());
-    uint8_t response_crc = response.crc;
-    response.crc = 0;
-    uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
-    if (response_crc != response_computed_crc)
+    if (q.last_command_ok == 0 || q.seq != seq)
     {
         return false;
     }
-
-    rate = static_cast<Rate>(response.rate);
-    if (response.last_command_ok == 0)
-    {
-        return false;
-    }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
     return true;
 }
 
@@ -514,33 +455,42 @@ bool Phy::set_channel(uint8_t channel)
         return false;
     }
 
-    prepare_transfer_buffers<SPI_Set_Channel_Header, SPI_Base_Response>(0);
-    SPI_Set_Channel_Header& header = *reinterpret_cast<SPI_Set_Channel_Header*>(m_tx_buffer.data());
-    memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_SET_CHANNEL;
-    header.channel = channel;
-    header.crc = crc8(0, &header, sizeof(header));
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Set_Channel_Header, SPI_Base_Response_Header>(0);
+        SPI_Set_Channel_Header& header = *reinterpret_cast<SPI_Set_Channel_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_SET_CHANNEL;
+        header.seq = seq;
+        header.channel = channel;
+        header.crc = crc8(0, &header, sizeof(header));
 
-    if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
-    {
-        return false;
-    }
-    gpioDelay(COMMAND_DELAY_US);
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        gpioDelay(COMMAND_DELAY_US);
 
-    SPI_Base_Response& response = *reinterpret_cast<SPI_Base_Response*>(m_rx_buffer.data());
-    uint8_t response_crc = response.crc;
-    response.crc = 0;
-    uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
-    if (response_crc != response_computed_crc)
+        SPI_Base_Response_Header& response = *reinterpret_cast<SPI_Base_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+    }
+    SPI_Query_Response_Header q;
+    if (!query(q))
     {
         return false;
     }
-    if (response.last_command_ok == 0)
+    if (q.last_command_ok == 0 || q.seq != seq)
     {
         return false;
     }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
     return true;
 }
 
@@ -550,34 +500,43 @@ bool Phy::get_channel(uint8_t& channel)
 {
     std::lock_guard<std::mutex> lg(m_mutex);
 
-    prepare_transfer_buffers<SPI_Get_Channel_Header, SPI_Get_Channel_Response_Header>(0);
-    SPI_Get_Channel_Header& header = *reinterpret_cast<SPI_Get_Channel_Header*>(m_tx_buffer.data());
-    memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_GET_CHANNEL;
-    header.crc = crc8(0, &header, sizeof(header));
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Get_Channel_Header, SPI_Get_Channel_Response_Header>(0);
+        SPI_Get_Channel_Header& header = *reinterpret_cast<SPI_Get_Channel_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_GET_CHANNEL;
+        header.seq = seq;
+        header.crc = crc8(0, &header, sizeof(header));
 
-    if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        gpioDelay(COMMAND_DELAY_US);
+
+        SPI_Get_Channel_Response_Header& response = *reinterpret_cast<SPI_Get_Channel_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+
+        channel = static_cast<uint8_t>(response.channel);
+    }
+    SPI_Query_Response_Header q;
+    if (!query(q))
     {
         return false;
     }
-    gpioDelay(COMMAND_DELAY_US);
-
-    SPI_Get_Channel_Response_Header& response = *reinterpret_cast<SPI_Get_Channel_Response_Header*>(m_rx_buffer.data());
-    uint8_t response_crc = response.crc;
-    response.crc = 0;
-    uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
-    if (response_crc != response_computed_crc)
+    if (q.last_command_ok == 0 || q.seq != seq)
     {
         return false;
     }
-
-    channel = static_cast<uint8_t>(response.channel);
-    if (response.last_command_ok == 0)
-    {
-        return false;
-    }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
     return true;
 }
 
@@ -587,36 +546,45 @@ bool Phy::set_power(float dBm)
 {
     std::lock_guard<std::mutex> lg(m_mutex);
 
-    prepare_transfer_buffers<SPI_Set_Power_Header, SPI_Base_Response>(0);
-    SPI_Set_Power_Header& header = *reinterpret_cast<SPI_Set_Power_Header*>(m_tx_buffer.data());
-    memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_SET_POWER;
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Set_Power_Header, SPI_Base_Response_Header>(0);
+        SPI_Set_Power_Header& header = *reinterpret_cast<SPI_Set_Power_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_SET_POWER;
+        header.seq = seq;
 
-    dBm = std::max(std::min(dBm, 100.f), -100.f);
-    header.power = static_cast<uint16_t>((dBm + 100.f) * 10.f);
-    header.crc = crc8(0, &header, sizeof(header));
+        dBm = std::max(std::min(dBm, 100.f), -100.f);
+        header.power = static_cast<uint16_t>((dBm + 100.f) * 10.f);
+        header.crc = crc8(0, &header, sizeof(header));
 
-    if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        gpioDelay(COMMAND_DELAY_US);
+
+        SPI_Base_Response_Header& response = *reinterpret_cast<SPI_Base_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+    }
+
+    SPI_Query_Response_Header q;
+    if (!query(q))
     {
         return false;
     }
-    gpioDelay(COMMAND_DELAY_US);
-
-    SPI_Base_Response& response = *reinterpret_cast<SPI_Base_Response*>(m_rx_buffer.data());
-    uint8_t response_crc = response.crc;
-    response.crc = 0;
-    uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
-    if (response_crc != response_computed_crc)
+    if (q.last_command_ok == 0 || q.seq != seq)
     {
         return false;
     }
-
-    if (response.last_command_ok == 0)
-    {
-        return false;
-    }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
     return true;
 }
 
@@ -626,34 +594,43 @@ bool Phy::get_power(float& dBm)
 {
     std::lock_guard<std::mutex> lg(m_mutex);
 
-    prepare_transfer_buffers<SPI_Get_Power_Header, SPI_Get_Power_Response_Header>(0);
-    SPI_Get_Power_Header& header = *reinterpret_cast<SPI_Get_Power_Header*>(m_tx_buffer.data());
-    memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_GET_POWER;
-    header.crc = crc8(0, &header, sizeof(header));
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Get_Power_Header, SPI_Get_Power_Response_Header>(0);
+        SPI_Get_Power_Header& header = *reinterpret_cast<SPI_Get_Power_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_GET_POWER;
+        header.seq = seq;
+        header.crc = crc8(0, &header, sizeof(header));
 
-    if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        gpioDelay(COMMAND_DELAY_US);
+
+        SPI_Get_Power_Response_Header& response = *reinterpret_cast<SPI_Get_Power_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+
+        dBm = static_cast<float>(static_cast<uint16_t>(response.power)) / 10.f - 100.f;
+    }
+    SPI_Query_Response_Header q;
+    if (!query(q))
     {
         return false;
     }
-    gpioDelay(COMMAND_DELAY_US);
-
-    SPI_Get_Power_Response_Header& response = *reinterpret_cast<SPI_Get_Power_Response_Header*>(m_rx_buffer.data());
-    uint8_t response_crc = response.crc;
-    response.crc = 0;
-    uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
-    if (response_crc != response_computed_crc)
+    if (q.last_command_ok == 0 || q.seq != seq)
     {
         return false;
     }
-
-    dBm = static_cast<float>(static_cast<uint16_t>(response.power)) / 10.f - 100.f;
-    if (response.last_command_ok == 0)
-    {
-        return false;
-    }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
     return true;
 }
 
@@ -663,22 +640,66 @@ bool Phy::setup_fec_channel(size_t coding_k, size_t coding_n, size_t mtu)
 {
     std::lock_guard<std::mutex> lg(m_mutex);
 
-    prepare_transfer_buffers<SPI_Setup_Fec_Codec_Header, SPI_Base_Response>(0);
-    SPI_Setup_Fec_Codec_Header& header = *reinterpret_cast<SPI_Setup_Fec_Codec_Header*>(m_tx_buffer.data());
+    uint8_t seq = (++m_seq) & 0x7F;
+    {
+        prepare_transfer_buffers<SPI_Setup_Fec_Codec_Header, SPI_Base_Response_Header>(0);
+        SPI_Setup_Fec_Codec_Header& header = *reinterpret_cast<SPI_Setup_Fec_Codec_Header*>(m_tx_buffer.data());
+        memset(&header, 0, sizeof(header));
+        header.command = SPI_Command::SPI_CMD_SETUP_FEC_CODEC;
+        header.seq = seq;
+        header.fec_coding_k = coding_k;
+        header.fec_coding_n = coding_n;
+        header.fec_mtu = mtu;
+        header.crc = crc8(0, &header, sizeof(header));
+
+        if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
+        {
+            return false;
+        }
+        gpioDelay(COMMAND_DELAY_US);
+
+        SPI_Base_Response_Header& response = *reinterpret_cast<SPI_Base_Response_Header*>(m_rx_buffer.data());
+        uint8_t response_crc = response.crc;
+        response.crc = 0;
+        uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
+        if (response_crc != response_computed_crc)
+        {
+            return false;
+        }
+    }
+
+    SPI_Query_Response_Header q;
+    if (!query(q))
+    {
+        return false;
+    }
+    if (q.last_command_ok == 0 || q.seq != seq)
+    {
+        return false;
+    }
+    m_pending_packets = q.pending_packets;
+    m_next_packet_size = q.next_packet_size;
+    return true;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+bool Phy::query(SPI_Query_Response_Header& query)
+{
+    uint8_t seq = (++m_seq) & 0x7F;
+    prepare_transfer_buffers<SPI_Query_Header, SPI_Query_Response_Header>(0);
+    SPI_Query_Header& header = *reinterpret_cast<SPI_Query_Header*>(m_tx_buffer.data());
     memset(&header, 0, sizeof(header));
-    header.command = SPI_Command::SPI_CMD_SETUP_FEC_CODEC;
-    header.fec_coding_k = coding_k;
-    header.fec_coding_n = coding_n;
-    header.fec_mtu = mtu;
+    header.command = SPI_Command::SPI_CMD_QUERY;
+    header.seq = seq;
     header.crc = crc8(0, &header, sizeof(header));
 
     if (!transfer(m_tx_buffer.data(), m_rx_buffer.data(), m_tx_buffer.size()))
     {
         return false;
     }
-    gpioDelay(COMMAND_DELAY_US);
 
-    SPI_Base_Response& response = *reinterpret_cast<SPI_Base_Response*>(m_rx_buffer.data());
+    SPI_Query_Response_Header& response = *reinterpret_cast<SPI_Query_Response_Header*>(m_rx_buffer.data());
     uint8_t response_crc = response.crc;
     response.crc = 0;
     uint8_t response_computed_crc = crc8(0, &response, sizeof(response));
@@ -686,40 +707,7 @@ bool Phy::setup_fec_channel(size_t coding_k, size_t coding_n, size_t mtu)
     {
         return false;
     }
-
-    if (response.last_command_ok == 0)
-    {
-        return false;
-    }
-    m_pending_packets = response.pending_packets;
-    m_next_packet_size = response.next_packet_size;
-    return true;
-}
-
-//////////////////////////////////////////////////////////////////////////////
-
-bool Phy::get_stats(Stats& stats)
-{
-    std::lock_guard<std::mutex> lg(m_mutex);
-
-    uint32_t command = (SPI_Command::SPI_CMD_GET_STATS << 24);
-    if (!send_command(command))
-    {
-        return false;
-    }
-    gpioDelay(COMMAND_DELAY_US);
-
-    {
-        std::array<uint8_t, 2 + CHUNK_SIZE> tx = { 0x3, 0x0 };
-        std::array<uint8_t, 2 + CHUNK_SIZE> rx = { 0x0 };
-
-        if (!transfer(tx.data(), rx.data(), tx.size())) //always do complete transactions
-        {
-            return false;
-        }
-        memcpy(&stats, rx.data() + 2, sizeof(Stats));
-    }
-
+    query = response;
     return true;
 }
 
@@ -732,9 +720,9 @@ void Phy::process()
     set_rate(Rate::RATE_G_54M_ODFM);
     set_channel(7);
     set_power(21.f);
-    setup_fec_channel(2, 4, 1350);
+    setup_fec_channel(2, 4, 1374);
 
-    std::array<uint8_t, 1350> data;
+    std::array<uint8_t, 1374> data;
     send_data(data.data(), data.size());
 
     size_t count = 0;
@@ -744,7 +732,8 @@ void Phy::process()
 
         send_data(data.data(), data.size());
 
-        gpioDelay(200);
+        //gpioDelay(2000);
+        //std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
         //exit(1);
 

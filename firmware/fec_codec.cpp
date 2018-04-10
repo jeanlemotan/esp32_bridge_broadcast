@@ -95,7 +95,7 @@ bool Fec_Codec::init(const Descriptor& descriptor)
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-bool Fec_Codec::is_initialized() const
+IRAM_ATTR bool Fec_Codec::is_initialized() const
 {
     return m_fec != nullptr;
 }
