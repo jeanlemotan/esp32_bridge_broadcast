@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <deque>
 #include <array>
 #include <mutex>
 #include <linux/spi/spidev.h>
@@ -36,39 +37,39 @@ public:
 
     enum class Rate
     {
-        RATE_B_1M_CCK,
-        RATE_B_2M_CCK,
-        RATE_B_2M_CCK_SHOST_PREAMBLE,
-        RATE_B_5_5M_CCK,
-        RATE_B_5_5M_CCK_SHOST_PREAMBLE,
-        RATE_B_11M_CCK,
-        RATE_B_11M_CCK_SHOST_PREAMBLE,
+        /*  0 */ RATE_B_1M_CCK,
+        /*  1 */ RATE_B_2M_CCK,
+        /*  2 */ RATE_B_2M_CCK_SHOST_PREAMBLE,
+        /*  3 */ RATE_B_5_5M_CCK,
+        /*  4 */ RATE_B_5_5M_CCK_SHOST_PREAMBLE,
+        /*  5 */ RATE_B_11M_CCK,
+        /*  6 */ RATE_B_11M_CCK_SHOST_PREAMBLE,
 
-        RATE_G_6M_ODFM,
-        RATE_G_9M_ODFM,
-        RATE_G_12M_ODFM,
-        RATE_G_18M_ODFM,
-        RATE_G_24M_ODFM,
-        RATE_G_36M_ODFM,
-        RATE_G_48M_ODFM,
-        RATE_G_54M_ODFM,
+        /*  7 */ RATE_G_6M_ODFM,
+        /*  8 */ RATE_G_9M_ODFM,
+        /*  9 */ RATE_G_12M_ODFM,
+        /* 10 */ RATE_G_18M_ODFM,
+        /* 11 */ RATE_G_24M_ODFM,
+        /* 12 */ RATE_G_36M_ODFM,
+        /* 13 */ RATE_G_48M_ODFM,
+        /* 14 */ RATE_G_54M_ODFM,
 
-        RATE_N_6_5M_MCS0,
-        RATE_N_7_2M_MCS0_SHORT_GI,
-        RATE_N_13M_MCS1,
-        RATE_N_14_4M_MCS1_SHORT_GI,
-        RATE_N_19_5M_MCS2,
-        RATE_N_21_7M_MCS2_SHORT_GI,
-        RATE_N_26M_MCS3,
-        RATE_N_28_9M_MCS3_SHORT_GI,
-        RATE_N_39M_MCS4,
-        RATE_N_43_3M_MCS4_SHORT_GI,
-        RATE_N_52M_MCS5,
-        RATE_N_57_8M_MCS5_SHORT_GI,
-        RATE_N_58M_MCS6,
-        RATE_N_65M_MCS6_SHORT_GI,
-        RATE_N_65M_MCS7,
-        RATE_N_72M_MCS7_SHORT_GI,
+        /* 15 */ RATE_N_6_5M_MCS0,
+        /* 16 */ RATE_N_7_2M_MCS0_SHORT_GI,
+        /* 17 */ RATE_N_13M_MCS1,
+        /* 18 */ RATE_N_14_4M_MCS1_SHORT_GI,
+        /* 19 */ RATE_N_19_5M_MCS2,
+        /* 21 */ RATE_N_21_7M_MCS2_SHORT_GI,
+        /* 22 */ RATE_N_26M_MCS3,
+        /* 23 */ RATE_N_28_9M_MCS3_SHORT_GI,
+        /* 24 */ RATE_N_39M_MCS4,
+        /* 25 */ RATE_N_43_3M_MCS4_SHORT_GI,
+        /* 26 */ RATE_N_52M_MCS5,
+        /* 27 */ RATE_N_57_8M_MCS5_SHORT_GI,
+        /* 28 */ RATE_N_58M_MCS6,
+        /* 29 */ RATE_N_65M_MCS6_SHORT_GI,
+        /* 30 */ RATE_N_65M_MCS7,
+        /* 31 */ RATE_N_72M_MCS7_SHORT_GI,
 
         COUNT
     };
@@ -97,9 +98,10 @@ public:
     bool get_stats(Stats& stats);
 
 private:
-    template<typename Req, typename Res>
+    bool transfer(void const* data, size_t size);
+
     void prepare_transfer_buffers(size_t payload_size);
-    bool transfer(void const* tx_data, void* rx_data, size_t size);
+    bool spi_transfer(void const* tx_data, void* rx_data, size_t size);
 
     bool query(SPI_Query_Response_Header& query);
 
@@ -118,9 +120,19 @@ private:
     uint32_t m_pending_packets = 0;
     uint32_t m_next_packet_size = 0;
 
+    struct RX_Packet
+    {
+        std::vector<uint8_t> data;
+        int rssi = 0;
+    };
+    std::vector<RX_Packet> m_rx_packet_pool;
+    std::deque<RX_Packet> m_rx_packets;
+
     static const size_t MAX_TRANSFERS = 64;
 
     std::array<std::vector<uint8_t>, MAX_TRANSFERS> m_spi_transfers_data;
     std::array<spi_ioc_transfer, MAX_TRANSFERS> m_spi_transfers;
+
+    std::chrono::high_resolution_clock::time_point m_last_transfer_tp = std::chrono::high_resolution_clock::now();
 };
 

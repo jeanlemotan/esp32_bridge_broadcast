@@ -12,7 +12,7 @@ constexpr uint8_t s_wlan_packet_header[] =
 };
 
 constexpr size_t WLAN_HEADER_SIZE = sizeof(s_wlan_packet_header);
-constexpr size_t WLAN_MAX_PACKET_SIZE = 1400;
+constexpr size_t WLAN_MAX_PACKET_SIZE = 1500;
 constexpr size_t WLAN_MAX_PAYLOAD_SIZE = WLAN_MAX_PACKET_SIZE - WLAN_HEADER_SIZE;
 
 static_assert(WLAN_HEADER_SIZE == 24, "");
@@ -35,10 +35,10 @@ struct Wlan_Incoming_Packet
 
 /////////////////////////////////////////////////////////////////////////
 
-constexpr size_t WLAN_INCOMING_BUFFER_SIZE = 13000;
+constexpr size_t WLAN_INCOMING_BUFFER_SIZE = 26000;
 alignas(uint32_t) uint8_t s_wlan_incoming_buffer[WLAN_INCOMING_BUFFER_SIZE];
 
-constexpr size_t WLAN_OUTGOING_BUFFER_SIZE = 13000;
+constexpr size_t WLAN_OUTGOING_BUFFER_SIZE = 26000;
 alignas(uint32_t) uint8_t s_wlan_outgoing_buffer[WLAN_OUTGOING_BUFFER_SIZE];
 
 
@@ -200,7 +200,10 @@ private:
 ////////////////////////////////////////////////////////////////////////////////////
 
 Queue<WLAN_INCOMING_BUFFER_SIZE> s_wlan_incoming_queue(s_wlan_incoming_buffer);
+portMUX_TYPE s_wlan_incoming_mux = portMUX_INITIALIZER_UNLOCKED;
+
 Queue<WLAN_OUTGOING_BUFFER_SIZE> s_wlan_outgoing_queue(s_wlan_outgoing_buffer);
+portMUX_TYPE s_wlan_outgoing_mux = portMUX_INITIALIZER_UNLOCKED;
 
 ////////////////////////////////////////////////////////////////////////////////////
 
@@ -308,21 +311,6 @@ IRAM_ATTR void cancel_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////
-
-struct lock_guard
-{
-  inline lock_guard() __attribute__((always_inline))
-  {
-    noInterrupts();
-  }
-  inline ~lock_guard() __attribute__((always_inline))
-  {
-    interrupts();
-  }
-  lock_guard(const lock_guard&) = delete;
-  lock_guard& operator=(const lock_guard&) = delete;
-};
-
 
 struct Stats
 {

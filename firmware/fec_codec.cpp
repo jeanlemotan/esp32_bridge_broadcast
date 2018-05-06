@@ -1,6 +1,7 @@
 #include "fec_codec.h"
 #include <cassert>
 #include <algorithm>
+#include "esp_task_wdt.h"
 
 #include <Arduino.h>
 #ifdef min
@@ -79,8 +80,8 @@ bool Fec_Codec::init(const Descriptor& descriptor)
 
     m_descriptor = descriptor;
 
-    m_encoder_pool_size = m_descriptor.coding_k * 2;
-    m_decoder_pool_size = m_descriptor.coding_n * 2;
+    m_encoder_pool_size = (m_descriptor.coding_k * 15) / 10;
+    m_decoder_pool_size = (m_descriptor.coding_n * 15) / 10;
 
     if (m_fec)
     {
@@ -120,6 +121,7 @@ void Fec_Codec::stop_tasks()
 {
     if (m_encoder.task)
     {
+        esp_task_wdt_delete(m_encoder.task);
         vTaskDelete(m_encoder.task);
         m_encoder.task = nullptr;
     }
@@ -133,26 +135,26 @@ void Fec_Codec::stop_tasks()
         vQueueDelete(m_encoder.packet_pool);
         m_encoder.packet_pool = nullptr;
     }
-    if (m_encoder.packet_pool_owned)
+    for (Encoder::Packet& packet: m_encoder.packet_pool_owned)
     {
-        for (size_t i = 0; i < m_encoder_pool_size; i++)
-        {
-            Encoder::Packet& p = m_encoder.packet_pool_owned[i];
-            delete p.data;
-        }
-        delete[] m_encoder.packet_pool_owned;
-        m_encoder.packet_pool_owned = nullptr;
+        delete packet.data;
     }
+    m_encoder.packet_pool_owned.clear();
+    
     for (Encoder::Packet& p : m_encoder.block_fec_packets)
     {
         delete p.data;
         p.data = nullptr;
     }
+    
+    m_encoder.fec_src_ptrs.clear();
+    m_encoder.fec_dst_ptrs.clear();
 
     ////////////////////////////////////////////////////////////////////////////////////////////
 
     if (m_decoder.task)
     {
+        esp_task_wdt_delete(m_decoder.task);
         vTaskDelete(m_decoder.task);
         m_decoder.task = nullptr;
     }
@@ -161,21 +163,25 @@ void Fec_Codec::stop_tasks()
         vQueueDelete(m_decoder.packet_queue);
         m_decoder.packet_queue = nullptr;
     }
+    for (Decoder::Packet& packet: m_decoder.fec_decoded_packets)
+    {
+        delete packet.data;
+    }
+    m_decoder.fec_decoded_packets.clear();
+    
     if (m_decoder.packet_pool)
     {
         vQueueDelete(m_decoder.packet_pool);
         m_decoder.packet_pool = nullptr;
     }
-    if (m_decoder.packet_pool_owned)
+    for (Decoder::Packet& packet: m_decoder.packet_pool_owned)
     {
-        for (size_t i = 0; i < m_decoder_pool_size; i++)
-        {
-            Decoder::Packet& p = m_decoder.packet_pool_owned[i];
-            delete p.data;
-        }
-        delete[] m_decoder.packet_pool_owned;
-        m_decoder.packet_pool_owned = nullptr;
+        delete packet.data;
     }
+    m_decoder.packet_pool_owned.clear();
+
+    m_decoder.fec_src_ptrs.clear();
+    m_decoder.fec_dst_ptrs.clear();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -195,37 +201,52 @@ bool Fec_Codec::start_tasks()
         stop_tasks();
         return false;
     }
+    
     m_encoder.packet_pool = xQueueCreate(m_encoder_pool_size, sizeof(Encoder::Packet));
     if (m_encoder.packet_pool == nullptr)
     {
         stop_tasks();
         return false;
     }
-    m_encoder.packet_pool_owned = new Encoder::Packet[m_encoder_pool_size];
-    for (size_t i = 0; i < m_encoder_pool_size; i++)
+    
+    m_encoder.packet_pool_owned.resize(m_encoder_pool_size);
+    for (Encoder::Packet& packet: m_encoder.packet_pool_owned)
     {
-        m_encoder.packet_pool_owned[i].data = new uint8_t[m_encoded_packet_size];
-    }
-    for (size_t i = 0; i < m_encoder_pool_size; i++)
-    {
-        BaseType_t res = xQueueSend(m_encoder.packet_pool, &m_encoder.packet_pool_owned[i], 0);
+        packet.data = new uint8_t[m_encoded_packet_size];
+        if (!packet.data)
+        {
+            stop_tasks();
+            return false;
+        }
+        BaseType_t res = xQueueSend(m_encoder.packet_pool, &packet, 0);
         if (res != pdPASS)
         {
             stop_tasks();
             return false;
         }
     }
+    
     m_encoder.block_fec_packets.resize(m_descriptor.coding_n - m_descriptor.coding_k);
-    for (Encoder::Packet& p : m_encoder.block_fec_packets)
+    for (Encoder::Packet& packet : m_encoder.block_fec_packets)
     {
-        p.data = new uint8_t[m_encoded_packet_size];
+        packet.data = new uint8_t[m_encoded_packet_size];
+        if (!packet.data)
+        {
+            stop_tasks();
+            return false;
+        }
     }
+
+    m_encoder.fec_src_ptrs.resize(m_descriptor.coding_k);
+    m_encoder.fec_dst_ptrs.resize(m_descriptor.coding_n);
+    
     if (m_descriptor.encoder_core != Core::Any)
     {
         int core = m_descriptor.encoder_core == Core::Core_0 ? 0 : 1;
         BaseType_t res = xTaskCreatePinnedToCore(&static_encoder_task_proc, "Encoder", STACK_SIZE, this, m_descriptor.encoder_priority, &m_encoder.task, core);
         if (res != pdPASS)
         {
+            Serial.printf("Failed core: %d", res);
             stop_tasks();
             return false;
         }
@@ -235,10 +256,12 @@ bool Fec_Codec::start_tasks()
         BaseType_t res = xTaskCreate(&static_encoder_task_proc, "Encoder", STACK_SIZE, this, m_descriptor.encoder_priority, &m_encoder.task);
         if (res != pdPASS)
         {
+            Serial.printf("Failed core: %d", res);
             stop_tasks();
             return false;
         }
     }
+    esp_task_wdt_add(m_encoder.task);
 
     ////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -249,32 +272,55 @@ bool Fec_Codec::start_tasks()
         stop_tasks();
         return false;
     }
+
+    //the amount of packets that need decoding is the smallest of:
+    // 1. Block size (coding_k)
+    // 2. Fec packets (coding_n - coding_k)
+    m_decoder.fec_decoded_packets.resize(std::min<int>(m_descriptor.coding_k, m_descriptor.coding_n - m_descriptor.coding_k));
+    for (Decoder::Packet& packet: m_decoder.fec_decoded_packets)
+    {
+        packet.data = new uint8_t[m_descriptor.mtu];
+        if (!packet.data)
+        {
+            stop_tasks();
+            return false;
+        }
+    }
+    
     m_decoder.packet_pool = xQueueCreate(m_decoder_pool_size, sizeof(Decoder::Packet));
     if (m_decoder.packet_pool == nullptr)
     {
         stop_tasks();
         return false;
     }
-    m_decoder.packet_pool_owned = new Decoder::Packet[m_decoder_pool_size];
-    for (size_t i = 0; i < m_decoder_pool_size; i++)
+    
+    m_decoder.packet_pool_owned.resize(m_decoder_pool_size);
+    for (Decoder::Packet& packet: m_decoder.packet_pool_owned)
     {
-        m_decoder.packet_pool_owned[i].data = new uint8_t[m_descriptor.mtu];
-    }
-    for (size_t i = 0; i < m_decoder_pool_size; i++)
-    {
-        BaseType_t res = xQueueSend(m_decoder.packet_pool, &m_decoder.packet_pool_owned[i], 0);
+        packet.data = new uint8_t[m_descriptor.mtu];
+        if (!packet.data)
+        {
+            stop_tasks();
+            return false;
+        }
+        BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
         if (res != pdPASS)
         {
             stop_tasks();
             return false;
         }
     }
+
+    m_decoder.fec_src_ptrs.resize(m_descriptor.coding_k);
+    m_decoder.fec_dst_ptrs.resize(m_descriptor.coding_n);
+
     if (m_descriptor.decoder_core != Core::Any)
     {
         int core = m_descriptor.decoder_core == Core::Core_0 ? 0 : 1;
         BaseType_t res = xTaskCreatePinnedToCore(&static_decoder_task_proc, "Decoder", STACK_SIZE, this, m_descriptor.decoder_priority, &m_decoder.task, core);
         if (res != pdPASS)
         {
+            Serial.printf("Failed core: %d", res);
             stop_tasks();
             return false;
         }
@@ -284,10 +330,12 @@ bool Fec_Codec::start_tasks()
         BaseType_t res = xTaskCreate(&static_decoder_task_proc, "Decoder", STACK_SIZE, this, m_descriptor.decoder_priority, &m_decoder.task);
         if (res != pdPASS)
         {
+            Serial.printf("Failed core: %d", res);
             stop_tasks();
             return false;
         }
     }
+    esp_task_wdt_add(m_decoder.task);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -312,17 +360,21 @@ void Fec_Codec::static_decoder_task_proc(void* params)
 
 IRAM_ATTR void Fec_Codec::encoder_task_proc()
 {
+    
     while (true)
     {
+        esp_task_wdt_reset();
+
         {
             ENCODER_LOG("1: Waiting for packet: %d\n", uxQueueSpacesAvailable(m_encoder.packet_queue));
 
             Encoder::Packet packet;
-            BaseType_t res = xQueueReceive(m_encoder.packet_queue, &packet, portMAX_DELAY);
+            BaseType_t res = xQueueReceive(m_encoder.packet_queue, &packet, 100 / portTICK_PERIOD_MS);
             if (res == pdFALSE || !packet.data)
             {
                 continue;
             }
+            taskYIELD();
             ENCODER_LOG("1: Received packet: %d\n", uxQueueSpacesAvailable(m_encoder.packet_queue));
 
             if (m_encoder.cb)
@@ -387,7 +439,7 @@ IRAM_ATTR void Fec_Codec::encoder_task_proc()
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-IRAM_ATTR bool Fec_Codec::encode_data(const void* _data, size_t size, bool block)
+IRAM_ATTR bool Fec_Codec::encode_data(const void* _data, size_t size, bool isr, bool block)
 {
     if (!m_encoder.task)
     {
@@ -402,7 +454,18 @@ IRAM_ATTR bool Fec_Codec::encode_data(const void* _data, size_t size, bool block
         if (!crt_packet.data)
         {
             ENCODER_LOG("0: Waiting for pool packet: %d\n", uxQueueSpacesAvailable(m_encoder.packet_pool));
-            BaseType_t res = xQueueReceive(m_encoder.packet_pool, &crt_packet, block ? portMAX_DELAY : 0);
+            BaseType_t res;
+            if (isr)
+            {
+                do
+                {
+                    res = xQueueReceiveFromISR(m_encoder.packet_pool, &crt_packet, nullptr);
+                } while (res != pdPASS && block);
+            }
+            else
+            {
+                res = xQueueReceive(m_encoder.packet_pool, &crt_packet, block ? portMAX_DELAY : 0);
+            }
             if (res != pdPASS || !crt_packet.data)
             {
                 return false;
@@ -421,12 +484,23 @@ IRAM_ATTR bool Fec_Codec::encode_data(const void* _data, size_t size, bool block
         if (crt_packet.size >= m_descriptor.mtu)
         {
             ENCODER_LOG("0: Enqueueing packet in the queue: %d\n", uxQueueSpacesAvailable(m_encoder.packet_queue));
-            BaseType_t res = xQueueSend(m_encoder.packet_queue, &crt_packet, block ? portMAX_DELAY : 0);
+            BaseType_t res;
+            if (isr)
+            {
+                do 
+                {
+                    res = xQueueSendFromISR(m_encoder.packet_queue, &crt_packet, nullptr);
+                } while (res != pdPASS && block);
+            }
+            else
+            {
+                res = xQueueSend(m_encoder.packet_queue, &crt_packet, block ? portMAX_DELAY : 0);
+            }
             if (res != pdPASS)
             {
                 ENCODER_LOG("0: Failed. Returning packet to the pool: %d\n", uxQueueSpacesAvailable(m_encoder.packet_pool));
                 //put it back in the pool and return false
-                res = xQueueSend(m_encoder.packet_pool, &crt_packet, 0);
+                res = isr ? xQueueSendFromISR(m_encoder.packet_pool, &crt_packet, nullptr) : xQueueSend(m_encoder.packet_pool, &crt_packet, 0);
                 assert(res == pdPASS);
                 crt_packet = Encoder::Packet();
                 return false;
@@ -440,7 +514,7 @@ IRAM_ATTR bool Fec_Codec::encode_data(const void* _data, size_t size, bool block
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-IRAM_ATTR bool Fec_Codec::decode_data(const void* _data, size_t size, bool block)
+IRAM_ATTR bool Fec_Codec::decode_data(const void* _data, size_t size, bool isr, bool block)
 {
     if (!m_decoder.task)
     {
@@ -455,7 +529,18 @@ IRAM_ATTR bool Fec_Codec::decode_data(const void* _data, size_t size, bool block
         if (!crt_packet.data)
         {
             DECODER_LOG("0: Waiting for pool packet: %d\n", uxQueueSpacesAvailable(m_decoder.packet_pool));
-            BaseType_t res = xQueueReceive(m_decoder.packet_pool, &crt_packet, block ? portMAX_DELAY : 0);
+            BaseType_t res;
+            if (isr)
+            {
+                do
+                { 
+                    res = xQueueReceiveFromISR(m_decoder.packet_pool, &crt_packet, nullptr);
+                } while (res != pdPASS && block);
+            }
+            else
+            {
+                res = xQueueReceive(m_decoder.packet_pool, &crt_packet, block ? portMAX_DELAY : 0);
+            }
             if (res != pdPASS || !crt_packet.data)
             {
                 return false;
@@ -499,12 +584,23 @@ IRAM_ATTR bool Fec_Codec::decode_data(const void* _data, size_t size, bool block
         if (crt_packet.size >= m_descriptor.mtu)
         {
             DECODER_LOG("0: Enqueueing packet in the queue: %d\n", uxQueueSpacesAvailable(m_decoder.packet_queue));
-            BaseType_t res = xQueueSend(m_decoder.packet_queue, &crt_packet, block ? portMAX_DELAY : 0);
+            BaseType_t res;
+            if (isr)
+            {
+                do
+                { 
+                    res = xQueueSendFromISR(m_decoder.packet_queue, &crt_packet, nullptr);
+                } while (res != pdPASS && block);
+            }
+            else
+            {
+                res = xQueueSend(m_decoder.packet_queue, &crt_packet, block ? portMAX_DELAY : 0);
+            }
             if (res != pdPASS)
             {
                 DECODER_LOG("0: Failed. Returning packet to the pool: %d\n", uxQueueSpacesAvailable(m_decoder.packet_pool));
                 //put it back in the pool and return false
-                res = xQueueSend(m_decoder.packet_pool, &crt_packet, 0);
+                res = isr ? xQueueSendFromISR(m_decoder.packet_pool, &crt_packet, nullptr) : xQueueSend(m_decoder.packet_pool, &crt_packet, 0);
                 assert(res == pdPASS);
                 crt_packet = Decoder::Packet();
                 return false;
@@ -522,15 +618,18 @@ void Fec_Codec::decoder_task_proc()
 {
     while (true)
     {
+        esp_task_wdt_reset();
+        
         {
             Decoder::Packet packet;
             DECODER_LOG("1: Waiting for packet: %d\n", uxQueueSpacesAvailable(m_decoder.packet_queue));
 
-            BaseType_t res = xQueueReceive(m_decoder.packet_queue, &packet, portMAX_DELAY);
+            BaseType_t res = xQueueReceive(m_decoder.packet_queue, &packet, 100 / portTICK_PERIOD_MS);
             if (res == pdFALSE || !packet.data)
             {
                 continue;
             }
+            taskYIELD();
             DECODER_LOG("1: Received packet: %d\n", uxQueueSpacesAvailable(m_decoder.packet_queue));
 
             uint32_t block_index = packet.block_index;
@@ -544,17 +643,32 @@ void Fec_Codec::decoder_task_proc()
                 assert(res == pdPASS);
                 continue;
             }
+            bool reset_block = false;
             if (block_index < m_decoder.crt_block_index)
             {
-                DECODER_LOG("1: Old packet: %d < %d\n", block_index, m_decoder.crt_block_index);
-                BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
-                assert(res == pdPASS);
-                continue;
+                if (block_index + 100 < m_decoder.crt_block_index)
+                {
+                    //pretty old block, means new session, restart decoding
+                    DECODER_LOG("1: Restarting decoding due to very old block: %d < %d\n", block_index, m_decoder.crt_block_index);
+                    reset_block = true;
+                }
+                else
+                {
+                    DECODER_LOG("1: Old packet: %d < %d\n", block_index, m_decoder.crt_block_index);
+                    BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
+                    assert(res == pdPASS);
+                    continue;
+                }
             }
 
             if (block_index > m_decoder.crt_block_index)
             {
                 DECODER_LOG("1: Abandoned block %d due to %d: packets %d, fec packets %d\n", m_decoder.crt_block_index, block_index, m_decoder.block_packets.size(), m_decoder.block_fec_packets.size());
+                reset_block = true;
+            }
+
+            if (reset_block)
+            {
                 //purge the entire block, we have a new one coming
                 for (Decoder::Packet& packet: m_decoder.block_packets)
                 {
@@ -611,6 +725,12 @@ void Fec_Codec::decoder_task_proc()
             if (m_decoder.block_packets.size() >= m_descriptor.coding_k)
             {
                 DECODER_LOG("1: Complete block\n");
+                for (Decoder::Packet& packet: m_decoder.block_fec_packets)
+                {
+                    BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
+                    assert(res);
+                }
+
                 for (Decoder::Packet& packet: m_decoder.block_packets)
                 {
                     uint32_t seq_number = packet.block_index * m_descriptor.coding_k + packet.packet_index;
@@ -626,11 +746,6 @@ void Fec_Codec::decoder_task_proc()
                         }
                         packet.is_processed = true;
                     }
-                    BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
-                    assert(res);
-                }
-                for (Decoder::Packet& packet: m_decoder.block_fec_packets)
-                {
                     BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
                     assert(res);
                 }
@@ -671,72 +786,96 @@ void Fec_Codec::decoder_task_proc()
                 DECODER_LOG("1: Complete FEC block\n");
 
                 std::array<unsigned int, 32> indices;
-                size_t primary_index = 0;
-                size_t used_fec_index = 0;
-                for (size_t i = 0; i < m_descriptor.coding_k; i++)
                 {
-                    if (primary_index < m_decoder.block_packets.size() && i == m_decoder.block_packets[primary_index].packet_index)
+                    //compute the packets indices and the fec source packets
+                    size_t primary_index = 0;
+                    size_t used_fec_index = 0;
+                    for (size_t i = 0; i < m_descriptor.coding_k; i++)
                     {
-                        m_decoder.fec_src_ptrs[i] = m_decoder.block_packets[primary_index].data;
-                        indices[i] = m_decoder.block_packets[primary_index].packet_index;
-                        primary_index++;
-                    }
-                    else
-                    {
-                        m_decoder.fec_src_ptrs[i] = m_decoder.block_fec_packets[used_fec_index].data;
-                        indices[i] = m_decoder.block_fec_packets[used_fec_index].packet_index;
-                        used_fec_index++;
+                        if (primary_index < m_decoder.block_packets.size() && i == m_decoder.block_packets[primary_index].packet_index)
+                        {
+                            m_decoder.fec_src_ptrs[i] = m_decoder.block_packets[primary_index].data;
+                            indices[i] = m_decoder.block_packets[primary_index].packet_index;
+                            primary_index++;
+                        }
+                        else
+                        {
+                            m_decoder.fec_src_ptrs[i] = m_decoder.block_fec_packets[used_fec_index].data;
+                            indices[i] = m_decoder.block_fec_packets[used_fec_index].packet_index;
+                            used_fec_index++;
+                        }
                     }
                 }
-
-                //insert the missing packets, they will be filled with data by the fec_decode below
-                size_t fec_index = 0;
-                for (size_t i = 0; i < m_descriptor.coding_k; i++)
+    
                 {
-                    if (i >= m_decoder.block_packets.size() || i != m_decoder.block_packets[i].packet_index)
+                    //compute the fec destination packets, they will be filled with data by the fec_decode below
+                    size_t fec_index = 0;
+                    size_t primary_index = 0;
+                    for (size_t i = 0; i < m_descriptor.coding_k; i++)
                     {
-                        Decoder::Packet packet;
-                        BaseType_t res = xQueueReceive(m_decoder.packet_pool, &packet, portMAX_DELAY);
-                        if (res == pdFALSE || !packet.data)
+                        if (primary_index < m_decoder.block_packets.size() && i == m_decoder.block_packets[primary_index].packet_index)
                         {
-                            assert(0);
-                            continue;
+                            primary_index++;
                         }
-
-                        packet.is_processed = false;
-                        packet.size = m_descriptor.mtu;
-                        packet.block_index = m_decoder.crt_block_index;
-                        packet.packet_index = i;
-                        m_decoder.block_packets.insert(m_decoder.block_packets.begin() + i, packet);
-                        m_decoder.fec_dst_ptrs[fec_index++] = packet.data;
+                        else
+                        {
+                            Decoder::Packet& packet = m_decoder.fec_decoded_packets[fec_index];
+                            packet.is_processed = false;
+                            packet.size = m_descriptor.mtu;
+                            packet.block_index = m_decoder.crt_block_index;
+                            packet.packet_index = i;
+                            m_decoder.fec_dst_ptrs[fec_index++] = packet.data;
+                        }
                     }
                 }
 
                 fec_decode(m_fec, m_decoder.fec_src_ptrs.data(), m_decoder.fec_dst_ptrs.data(), indices.data(), m_descriptor.mtu);
 
-                //now dispatch them
-                for (Decoder::Packet& packet: m_decoder.block_packets)
-                {
-                    uint32_t seq_number = packet.block_index * m_descriptor.coding_k + packet.packet_index;
-                    if (!packet.is_processed)
-                    {
-                        //                        if (s_last_seq_number + 1 != seq_number)
-                        //                            printf("Packet F %d: %s\n", seq_number, s_last_seq_number + 1 == seq_number ? "Ok" : "Skipped");
-                        //                        s_last_seq_number = seq_number;
-                        if (m_decoder.cb)
-                        {
-                            m_decoder.cb(packet.data, packet.size);
-                        }
-                        packet.is_processed = true;
-                    }
-                    BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
-                    assert(res);
-                }
+                //release these as soon as they are not needed
                 for (Decoder::Packet& packet: m_decoder.block_fec_packets)
                 {
                     BaseType_t res = xQueueSend(m_decoder.packet_pool, &packet, 0);
                     assert(res);
                 }
+
+                {
+                    //now dispatch them, either from the primary packets or from the fec decoded ones
+                    size_t fec_index = 0;
+                    size_t primary_index = 0;
+                    for (size_t i = 0; i < m_descriptor.coding_k; i++)
+                    {
+                        bool release_to_pool = false;
+                        Decoder::Packet* packet = nullptr;
+                        if (primary_index < m_decoder.block_packets.size() && i == m_decoder.block_packets[primary_index].packet_index)
+                        {
+                            packet = &m_decoder.block_packets[primary_index++];
+                            release_to_pool = true;
+                        }
+                        else
+                        {
+                            packet = &m_decoder.fec_decoded_packets[fec_index++];
+                        }
+                        uint32_t seq_number = packet->block_index * m_descriptor.coding_k + packet->packet_index;
+                        if (!packet->is_processed)
+                        {
+                            //                        if (s_last_seq_number + 1 != seq_number)
+                            //                            printf("Packet F %d: %s\n", seq_number, s_last_seq_number + 1 == seq_number ? "Ok" : "Skipped");
+                            //                        s_last_seq_number = seq_number;
+                            if (m_decoder.cb)
+                            {
+                                m_decoder.cb(packet->data, packet->size);
+                            }
+                            packet->is_processed = true;
+                        }
+
+                        if (release_to_pool)
+                        {
+                            BaseType_t res = xQueueSend(m_decoder.packet_pool, packet, 0);
+                            assert(res);
+                        }
+                    }
+                }
+
                 m_decoder.block_packets.clear();
                 m_decoder.block_fec_packets.clear();
                 m_decoder.crt_block_index++;

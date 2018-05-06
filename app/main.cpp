@@ -13,9 +13,8 @@ bool s_verbose = false;
 bool s_flush = false;
 
 bool s_phy_benchmark = false;
-bool s_use_fec = false;
-uint32_t s_fec_coding_k = 0;
-uint32_t s_fec_coding_n = 0;
+uint32_t s_fec_coding_k = 4;
+uint32_t s_fec_coding_n = 6;
 
 const size_t MAX_MTU = Phy::MAX_PAYLOAD_SIZE;
 size_t s_mtu = MAX_MTU;
@@ -24,9 +23,9 @@ bool s_use_spi_dev = true;
 std::string s_spi_dev = "/dev/spidev0.0";
 size_t s_pigpio_spi_port = 0;
 size_t s_pigpio_spi_channel = 0;
-size_t s_spi_speed = 10000000;
-size_t s_spi_delay = 0;
-Phy::Rate s_phy_rate = Phy::Rate::RATE_B_5_5M_CCK;
+size_t s_spi_speed = 12000000;
+size_t s_spi_delay = 10;
+Phy::Rate s_phy_rate = Phy::Rate::RATE_G_54M_ODFM;
 float s_phy_power = 20.5f;
 uint8_t s_phy_channel = 1;
 
@@ -129,7 +128,6 @@ int parse_arguments(int argc, const char* argv[])
                 std::cerr << "FEC coding K has to be smaller than N.\n";
                 return -1;
             }
-            s_use_fec = true;
             i += 2;
         }
         else if (arg == "--mtu")
@@ -348,6 +346,7 @@ int main(int argc, const char* argv[])
     phy.set_rate(s_phy_rate);
     phy.set_power(s_phy_power);
     phy.set_channel(s_phy_channel);
+    phy.setup_fec_channel(s_fec_coding_k, s_fec_coding_n, s_mtu);
     int actual_rate = -1;
     float actual_power = -1;
     int actual_channel = -1;

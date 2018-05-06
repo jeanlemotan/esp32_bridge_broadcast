@@ -20,6 +20,8 @@ struct fec_t {
 #endif
 #define restrict __restrict
 
+void init_fec (void);
+  
 /**
  * param k the number of blocks required to reconstruct
  * param m the total number of blocks created

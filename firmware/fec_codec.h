@@ -50,7 +50,7 @@ public:
     //Add here data that will be encoded.
     //Size dosn't have to be a full packet. Can be anything > 0, even bigger than a packet
     //NOTE: This has to be called from a single thread only (any thread, as long as it's just one)
-    IRAM_ATTR bool encode_data(const void* data, size_t size, bool block);
+    IRAM_ATTR bool encode_data(const void* data, size_t size, bool isr, bool block);
 
     //Callback for when a decoded packet is ready.
     //NOTE: this is called form another thread!!!
@@ -59,7 +59,7 @@ public:
     //Add here data that will be decoded.
     //Size dosn't have to be a full packet. Can be anything > 0, even bigger than a packet
     //NOTE: This has to be called from a single thread only (any thread, as long as it's just one)
-    IRAM_ATTR bool decode_data(const void* data, size_t size, bool block);
+    IRAM_ATTR bool decode_data(const void* data, size_t size, bool isr, bool block);
 
 private:
     void stop_tasks();
@@ -95,10 +95,10 @@ private:
         std::vector<Packet> block_packets;
         std::vector<Packet> block_fec_packets; //these are owned by the array
 
-        std::array<uint8_t const*, MAX_CODING_K> fec_src_ptrs;
-        std::array<uint8_t*, MAX_CODING_N> fec_dst_ptrs;
+        std::vector<uint8_t const*> fec_src_ptrs;
+        std::vector<uint8_t*> fec_dst_ptrs;
 
-        Packet* packet_pool_owned;
+        std::vector<Packet> packet_pool_owned;
 
         Packet crt_packet;
 
@@ -126,10 +126,11 @@ private:
         std::vector<Packet> block_packets;
         std::vector<Packet> block_fec_packets;
 
-        std::array<uint8_t const*, MAX_CODING_K> fec_src_ptrs;
-        std::array<uint8_t*, MAX_CODING_N> fec_dst_ptrs;
+        std::vector<uint8_t const*> fec_src_ptrs;
+        std::vector<uint8_t*> fec_dst_ptrs;
 
-        Packet* packet_pool_owned;
+        std::vector<Packet> fec_decoded_packets;
+        std::vector<Packet> packet_pool_owned;
 
         Packet crt_packet;
 

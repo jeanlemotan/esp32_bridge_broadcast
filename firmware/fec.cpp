@@ -396,14 +396,12 @@ _invert_vdm (gf* src, unsigned k) {
 }
 
 static int fec_initialized = 0;
-static void
-init_fec (void) {
-    Serial.printf("init fec\n");
-    Serial.flush();
-    
+void init_fec (void) {
+  if (fec_initialized == 0) {
     generate_gf();
     _init_mul_table();
     fec_initialized = 1;
+  }
 }
 
 /*
@@ -428,7 +426,6 @@ fec_new(unsigned short k, unsigned short n) {
 
     fec_t *retval;
 
-    Serial.printf("new fec, %d / %d\n", k, n);
     if (fec_initialized == 0)
         init_fec ();
 
