@@ -13,6 +13,7 @@
 #include "wifi_raw.h"
 #include "fec_codec.h"
 #include "esp_task_wdt.h"
+#include "bt.h"
 
 #include "structures.h"
 #include "spi_comms.h"
@@ -63,7 +64,7 @@ static constexpr gpio_num_t GPIO_CS = gpio_num_t(15);
 
 /////////////////////////////////////////////////////////////////////////
 
-static int s_uart_verbose = 1;
+static int s_uart_verbose = 0;
 static char s_uart_command = 0;
 static int s_uart_error_count = 0;
 
@@ -207,6 +208,98 @@ IRAM_ATTR esp_err_t event_handler(void *ctx, system_event_t *event)
 
 int16_t s_wlan_incoming_rssi = 0; //this is protected by the s_wlan_incoming_mux
 
+///////////////////////////////////////////////////////////////////////////////////////////
+
+IRAM_ATTR void add_to_wlan_outgoing_queue(const Wlan_Packet_Header& packet_header, const void* data, size_t size, bool isr)
+{
+    Wlan_Outgoing_Packet packet;
+
+    if (isr)
+    {
+      portENTER_CRITICAL_ISR(&s_wlan_outgoing_mux);
+      start_writing_wlan_outgoing_packet(packet, size + sizeof(Wlan_Packet_Header));
+      portEXIT_CRITICAL_ISR(&s_wlan_outgoing_mux);
+    }
+    else
+    {
+      portENTER_CRITICAL(&s_wlan_outgoing_mux);
+      start_writing_wlan_outgoing_packet(packet, size + sizeof(Wlan_Packet_Header));
+      portEXIT_CRITICAL(&s_wlan_outgoing_mux);
+    }
+    
+    if (!packet.ptr)
+    {
+        //LOG("Sending failed: previous packet still in flight\n");
+        return;
+    }
+    //LOG("Sending %d\n", size);
+
+    *((Wlan_Packet_Header*)packet.payload_ptr) = packet_header;
+
+    memcpy(packet.payload_ptr + sizeof(Wlan_Packet_Header), data, size);
+    
+    //LOG("Sending packet of size %d\n", packet.size);
+
+    if (isr)
+    {
+      portENTER_CRITICAL_ISR(&s_wlan_outgoing_mux);
+      end_writing_wlan_outgoing_packet(packet);
+      portEXIT_CRITICAL_ISR(&s_wlan_outgoing_mux);  
+    }
+    else
+    {
+      portENTER_CRITICAL(&s_wlan_outgoing_mux);
+      end_writing_wlan_outgoing_packet(packet);
+      portEXIT_CRITICAL(&s_wlan_outgoing_mux);  
+    }
+}
+
+IRAM_ATTR void add_to_wlan_incoming_queue(const void* data, size_t size, int16_t rssi, bool isr)
+{
+    Wlan_Incoming_Packet packet;
+
+    if (isr)
+    {
+      portENTER_CRITICAL_ISR(&s_wlan_incoming_mux);
+      start_writing_wlan_incoming_packet(packet, size);
+      portEXIT_CRITICAL_ISR(&s_wlan_incoming_mux);
+    }
+    else
+    {
+      portENTER_CRITICAL(&s_wlan_incoming_mux);
+      start_writing_wlan_incoming_packet(packet, size);
+      portEXIT_CRITICAL(&s_wlan_incoming_mux);
+    }
+    
+    if (!packet.ptr)
+    {
+        //LOG("Sending failed: previous packet still in flight\n");
+        return;
+    }
+    //LOG("decoded %d\n", size);
+    
+    memcpy(packet.ptr, data, size);
+    
+    //LOG("Sending packet of size %d\n", packet.size);
+
+    packet.rssi = rssi;
+
+    if (isr)
+    {
+      portENTER_CRITICAL_ISR(&s_wlan_incoming_mux);
+      end_writing_wlan_incoming_packet(packet);
+      portEXIT_CRITICAL_ISR(&s_wlan_incoming_mux);
+    }
+    else
+    {
+      portENTER_CRITICAL(&s_wlan_incoming_mux);
+      end_writing_wlan_incoming_packet(packet);
+      portEXIT_CRITICAL(&s_wlan_incoming_mux);
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////
+
 IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 {
     if (type == WIFI_PKT_MGMT)
@@ -230,7 +323,7 @@ IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
     //s_stats.wlan_data_received += len;
     //s_stats.wlan_data_sent += 1;
 
-    if (len <= WLAN_HEADER_SIZE)
+    if (len <= WLAN_IEEE_HEADER_SIZE + sizeof(Wlan_Packet_Header))
     {
         //LOG("WLAN receive header error");
         s_stats.wlan_error_count++;
@@ -243,13 +336,13 @@ IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
     //uint8_t broadcast_mac[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
     //Serial.printf("MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     uint8_t* data = pkt->payload;
-    if (memcmp(data + 10, s_wlan_packet_header + 10, 6) != 0)
+    if (memcmp(data + 10, s_wlan_ieee_header + 10, 6) != 0)
     {
         return;
     }
 
-    data += WLAN_HEADER_SIZE;
-    len -= WLAN_HEADER_SIZE; //skip the 802.11 header
+    data += WLAN_IEEE_HEADER_SIZE;
+    len -= WLAN_IEEE_HEADER_SIZE; //skip the 802.11 header
 
     len -= 4;//the received length has 4 more bytes at the end for some reason.
 
@@ -269,16 +362,27 @@ IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 
     size_t size = std::min<size_t>(len, WLAN_MAX_PAYLOAD_SIZE);
 
-    portENTER_CRITICAL_ISR(&s_wlan_incoming_mux);
-    s_wlan_incoming_rssi = rssi;
-    portEXIT_CRITICAL_ISR(&s_wlan_incoming_mux);
-
-    portENTER_CRITICAL_ISR(&s_fec_codec_mux);
-    if (!s_fec_codec.decode_data(data, size, true, false))
+    Wlan_Packet_Header& packet_header = *((Wlan_Packet_Header*)data);
+    data += sizeof(Wlan_Packet_Header);
+    size -= sizeof(Wlan_Packet_Header);
+    
+    if (packet_header.uses_fec)
     {
-        s_stats.wlan_received_packets_dropped++;
+      portENTER_CRITICAL_ISR(&s_wlan_incoming_mux);
+      s_wlan_incoming_rssi = rssi;
+      portEXIT_CRITICAL_ISR(&s_wlan_incoming_mux);
+  
+      portENTER_CRITICAL_ISR(&s_fec_codec_mux);
+      if (!s_fec_codec.decode_data(data, size, true, false))
+      {
+          s_stats.wlan_received_packets_dropped++;
+      }
+      portEXIT_CRITICAL_ISR(&s_fec_codec_mux);
     }
-    portEXIT_CRITICAL_ISR(&s_fec_codec_mux);
+    else
+    {
+      add_to_wlan_incoming_queue(data, size, rssi, true);
+    }
     
     s_stats.wlan_data_received += len;
 }
@@ -391,15 +495,15 @@ void parse_command()
             LOG("Command error: Illegal channel %c\n", ch);
             return;
         }
-        /*    if (wifi_set_channel(channel))
-    {
-      LOG("Channel set to %d\n", channel);
+        if (esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) == ESP_OK)
+        {
+          LOG("Channel set to %d\n", channel);
+        }
+        else
+        {
+          LOG("Command error: call to wifi_set_channel failed\n");
+        }
     }
-    else
-    {
-      LOG("Command error: call to wifi_set_channel failed\n");
-    }
-*/  }
     else if (s_uart_command == 'P')
     {
         if (available == 0)
@@ -461,51 +565,18 @@ void parse_command()
 
 IRAM_ATTR void fec_encoded_cb(void* data, size_t size)
 {
-    Wlan_Outgoing_Packet packet;
-    
-    portENTER_CRITICAL(&s_wlan_outgoing_mux);
-    start_writing_wlan_outgoing_packet(packet, size);
-    portEXIT_CRITICAL(&s_wlan_outgoing_mux);
-    
-    if (!packet.ptr)
-    {
-        //LOG("Sending failed: previous packet still in flight\n");
-        return;
-    }
-    //LOG("Sending %d\n", size);
-    
-    memcpy(packet.payload_ptr, data, size);
-    
-    //LOG("Sending packet of size %d\n", packet.size);
-    
-    portENTER_CRITICAL(&s_wlan_outgoing_mux);
-    end_writing_wlan_outgoing_packet(packet);
-    portEXIT_CRITICAL(&s_wlan_outgoing_mux);
+    Wlan_Packet_Header packet_header;
+    packet_header.uses_fec = 1;
+    add_to_wlan_outgoing_queue(packet_header, data, size, false);
 }
 
 IRAM_ATTR void fec_decoded_cb(void* data, size_t size)
 {
-    Wlan_Incoming_Packet packet;
-    
     portENTER_CRITICAL(&s_wlan_incoming_mux);
-    start_writing_wlan_incoming_packet(packet, size);
+    int16_t rssi = s_wlan_incoming_rssi;
     portEXIT_CRITICAL(&s_wlan_incoming_mux);
     
-    if (!packet.ptr)
-    {
-        //LOG("Sending failed: previous packet still in flight\n");
-        return;
-    }
-    //LOG("decoded %d\n", size);
-    
-    memcpy(packet.ptr, data, size);
-    
-    //LOG("Sending packet of size %d\n", packet.size);
-    
-    portENTER_CRITICAL(&s_wlan_incoming_mux);
-    packet.rssi = s_wlan_incoming_rssi;
-    end_writing_wlan_incoming_packet(packet);
-    portEXIT_CRITICAL(&s_wlan_incoming_mux);
+    add_to_wlan_incoming_queue(data, size, rssi, false);
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -736,20 +807,32 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
                 LOG("Too much data: %d, %d\n", req_header.packet_size, WLAN_MAX_PAYLOAD_SIZE);
                 s_stats.spi_error_count++;
             }
-            else if (!s_fec_codec.is_initialized())
+            else
             {
-                LOG("Uninitialized fec codec\n");
-                s_stats.spi_error_count++;
-            }
-            else 
-            {
-                portENTER_CRITICAL_ISR(&s_fec_codec_mux);
-                if (!s_fec_codec.encode_data(s_spi_rx_buffer + sizeof(req_header), req_header.packet_size, true, false))
+                if (req_header.use_fec)
                 {
-                    LOG("Fec codec busy\n");
-                    s_stats.spi_error_count++;
+                    if (!s_fec_codec.is_initialized())
+                    {
+                        LOG("Uninitialized fec codec\n");
+                        s_stats.spi_error_count++;
+                    }
+                    else 
+                    {
+                        portENTER_CRITICAL_ISR(&s_fec_codec_mux);
+                        if (!s_fec_codec.encode_data(s_spi_rx_buffer + sizeof(req_header), req_header.packet_size, true, false))
+                        {
+                            LOG("Fec codec busy\n");
+                            s_stats.spi_error_count++;
+                        }
+                        portEXIT_CRITICAL_ISR(&s_fec_codec_mux);
+                    }
                 }
-                portEXIT_CRITICAL_ISR(&s_fec_codec_mux);
+                else
+                {
+                    Wlan_Packet_Header packet_header;
+                    packet_header.uses_fec = 0;
+                    add_to_wlan_outgoing_queue(packet_header, s_spi_rx_buffer + sizeof(req_header), req_header.packet_size, true);
+                }
             }
         }
         setup_spi_packet_response(transfer_size, req_header.seq);
@@ -935,6 +1018,10 @@ void setup()
 
     heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
+    esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+
+    heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
     // Initialize NVS.
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES) 
@@ -992,7 +1079,7 @@ void setup()
 */
     
 
-    bool ok = false;
+    //bool ok = false;
 
     ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
 
@@ -1031,6 +1118,20 @@ void setup()
 Wlan_Outgoing_Packet s_outgoing_wlan_packet;
 IRAM_ATTR void loop() 
 {
+  /*
+    static bool xxx = false;
+    if (xxx)
+    {
+      digitalWrite(STATUS_LED_PIN, STATUS_LED_ON);
+    }
+    else
+    {
+      digitalWrite(STATUS_LED_PIN, STATUS_LED_OFF);
+    }
+    xxx = !xxx;
+    delay(1000);
+    */
+    
     parse_command();
 
     //send pending wlan packets
@@ -1042,14 +1143,14 @@ IRAM_ATTR void loop()
         
         if (s_outgoing_wlan_packet.ptr)
         {
-            memcpy(s_outgoing_wlan_packet.ptr, s_wlan_packet_header, WLAN_HEADER_SIZE);
+            memcpy(s_outgoing_wlan_packet.ptr, s_wlan_ieee_header, WLAN_IEEE_HEADER_SIZE);
         }
     }
 
     if (s_outgoing_wlan_packet.ptr)
     {
         //LOG("packet %d", p.size);
-        esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, s_outgoing_wlan_packet.ptr, WLAN_HEADER_SIZE + s_outgoing_wlan_packet.size, false);
+        esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, s_outgoing_wlan_packet.ptr, WLAN_IEEE_HEADER_SIZE + s_outgoing_wlan_packet.size, false);
         if (res == ESP_OK)
         {
             //delay(15);
@@ -1071,7 +1172,7 @@ IRAM_ATTR void loop()
 
     {
         spi_slave_transaction_t* qt = nullptr;
-        esp_err_t err = spi_slave_get_trans_result(VSPI_HOST, &qt, 0);
+        spi_slave_get_trans_result(VSPI_HOST, &qt, 0);
         if (qt)
         {
             process_spi_transaction(qt);

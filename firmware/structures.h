@@ -2,7 +2,7 @@
 
 #include <cassert>
 
-constexpr uint8_t s_wlan_packet_header[] =
+constexpr uint8_t s_wlan_ieee_header[] =
 {
     0x08, 0x01, 0x00, 0x00,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -11,11 +11,11 @@ constexpr uint8_t s_wlan_packet_header[] =
     0x10, 0x86
 };
 
-constexpr size_t WLAN_HEADER_SIZE = sizeof(s_wlan_packet_header);
+constexpr size_t WLAN_IEEE_HEADER_SIZE = sizeof(s_wlan_ieee_header);
 constexpr size_t WLAN_MAX_PACKET_SIZE = 1500;
-constexpr size_t WLAN_MAX_PAYLOAD_SIZE = WLAN_MAX_PACKET_SIZE - WLAN_HEADER_SIZE;
+constexpr size_t WLAN_MAX_PAYLOAD_SIZE = WLAN_MAX_PACKET_SIZE - WLAN_IEEE_HEADER_SIZE;
 
-static_assert(WLAN_HEADER_SIZE == 24, "");
+static_assert(WLAN_IEEE_HEADER_SIZE == 24, "");
 
 struct Wlan_Outgoing_Packet
 {
@@ -33,12 +33,17 @@ struct Wlan_Incoming_Packet
   int8_t rssi = 0;
 };
 
+struct Wlan_Packet_Header
+{
+  uint8_t uses_fec : 1;
+};
+
 /////////////////////////////////////////////////////////////////////////
 
-constexpr size_t WLAN_INCOMING_BUFFER_SIZE = 26000;
+constexpr size_t WLAN_INCOMING_BUFFER_SIZE = 32000;
 alignas(uint32_t) uint8_t s_wlan_incoming_buffer[WLAN_INCOMING_BUFFER_SIZE];
 
-constexpr size_t WLAN_OUTGOING_BUFFER_SIZE = 26000;
+constexpr size_t WLAN_OUTGOING_BUFFER_SIZE = 32000;
 alignas(uint32_t) uint8_t s_wlan_outgoing_buffer[WLAN_OUTGOING_BUFFER_SIZE];
 
 
@@ -85,6 +90,7 @@ struct Queue
     {
       return (N - m_read_start) + m_write_end;
     }
+    return 0;
   }
 
   IRAM_ATTR inline size_t capacity() const
@@ -209,7 +215,7 @@ portMUX_TYPE s_wlan_outgoing_mux = portMUX_INITIALIZER_UNLOCKED;
 
 IRAM_ATTR bool start_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet, size_t size)
 {
-  size_t real_size = WLAN_HEADER_SIZE + size;
+  size_t real_size = WLAN_IEEE_HEADER_SIZE + size;
   uint8_t* buffer = s_wlan_outgoing_queue.start_writing(real_size);
   if (!buffer)
   {
@@ -219,7 +225,7 @@ IRAM_ATTR bool start_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet, 
   packet.offset = 0;
   packet.size = size;
   packet.ptr = buffer;
-  packet.payload_ptr = buffer + WLAN_HEADER_SIZE;
+  packet.payload_ptr = buffer + WLAN_IEEE_HEADER_SIZE;
   return true;
 }
 IRAM_ATTR void end_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
@@ -243,9 +249,9 @@ IRAM_ATTR bool start_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
     return false;
   }
   packet.offset = 0;
-  packet.size = real_size - WLAN_HEADER_SIZE;
+  packet.size = real_size - WLAN_IEEE_HEADER_SIZE;
   packet.ptr = buffer;
-  packet.payload_ptr = buffer + WLAN_HEADER_SIZE;
+  packet.payload_ptr = buffer + WLAN_IEEE_HEADER_SIZE;
   return true;
 }
 IRAM_ATTR void end_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)

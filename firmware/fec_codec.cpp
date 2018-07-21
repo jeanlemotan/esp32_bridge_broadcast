@@ -336,6 +336,8 @@ bool Fec_Codec::start_tasks()
         }
     }
     esp_task_wdt_add(m_decoder.task);
+
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -733,7 +735,7 @@ void Fec_Codec::decoder_task_proc()
 
                 for (Decoder::Packet& packet: m_decoder.block_packets)
                 {
-                    uint32_t seq_number = packet.block_index * m_descriptor.coding_k + packet.packet_index;
+                    //uint32_t seq_number = packet.block_index * m_descriptor.coding_k + packet.packet_index;
                     if (!packet.is_processed)
                     {
                         //                        if (s_last_seq_number + 1 != seq_number)
@@ -761,7 +763,7 @@ void Fec_Codec::decoder_task_proc()
                 Decoder::Packet& packet = m_decoder.block_packets[i];
                 if (packet.packet_index == i)
                 {
-                    uint32_t seq_number = packet.block_index * m_descriptor.coding_k + packet.packet_index;
+                    //uint32_t seq_number = packet.block_index * m_descriptor.coding_k + packet.packet_index;
                     if (!packet.is_processed)
                     {
                         //                        if (s_last_seq_number + 1 != seq_number)
@@ -855,7 +857,7 @@ void Fec_Codec::decoder_task_proc()
                         {
                             packet = &m_decoder.fec_decoded_packets[fec_index++];
                         }
-                        uint32_t seq_number = packet->block_index * m_descriptor.coding_k + packet->packet_index;
+                        //uint32_t seq_number = packet->block_index * m_descriptor.coding_k + packet->packet_index;
                         if (!packet->is_processed)
                         {
                             //                        if (s_last_seq_number + 1 != seq_number)
