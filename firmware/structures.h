@@ -30,7 +30,6 @@ struct Wlan_Incoming_Packet
   uint8_t* ptr = nullptr;
   uint16_t size = 0;
   uint16_t offset = 0;
-  int8_t rssi = 0;
 };
 
 struct Wlan_Packet_Header
@@ -40,10 +39,10 @@ struct Wlan_Packet_Header
 
 /////////////////////////////////////////////////////////////////////////
 
-constexpr size_t WLAN_INCOMING_BUFFER_SIZE = 32000;
+constexpr size_t WLAN_INCOMING_BUFFER_SIZE = 30000;
 alignas(uint32_t) uint8_t s_wlan_incoming_buffer[WLAN_INCOMING_BUFFER_SIZE];
 
-constexpr size_t WLAN_OUTGOING_BUFFER_SIZE = 32000;
+constexpr size_t WLAN_OUTGOING_BUFFER_SIZE = 30000;
 alignas(uint32_t) uint8_t s_wlan_outgoing_buffer[WLAN_OUTGOING_BUFFER_SIZE];
 
 
@@ -332,3 +331,13 @@ struct Stats
 static_assert(sizeof(Stats) == 6 * 4, "Stats too big");
 
 Stats s_stats;
+
+
+struct ADC_Data
+{
+    uint32_t accumulated_data = 0;
+    uint32_t sample_count = 0;
+};
+
+constexpr size_t MAX_ADC = 8;
+

@@ -2,11 +2,14 @@
 #include <algorithm>
 
 #include "driver/spi_slave.h"
+#include "EEPROM.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_event_loop.h"
 #include "esp_wifi.h"
+#include <driver/adc.h>
+#include "esp_adc_cal.h"
 #include "esp_wifi_types.h"
 #include "esp_wifi_internal.h"
 #include "esp_heap_caps.h"
@@ -254,7 +257,7 @@ IRAM_ATTR void add_to_wlan_outgoing_queue(const Wlan_Packet_Header& packet_heade
     }
 }
 
-IRAM_ATTR void add_to_wlan_incoming_queue(const void* data, size_t size, int16_t rssi, bool isr)
+IRAM_ATTR void add_to_wlan_incoming_queue(const void* data, size_t size, bool isr)
 {
     Wlan_Incoming_Packet packet;
 
@@ -281,8 +284,6 @@ IRAM_ATTR void add_to_wlan_incoming_queue(const void* data, size_t size, int16_t
     memcpy(packet.ptr, data, size);
     
     //LOG("Sending packet of size %d\n", packet.size);
-
-    packet.rssi = rssi;
 
     if (isr)
     {
@@ -365,13 +366,13 @@ IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
     Wlan_Packet_Header& packet_header = *((Wlan_Packet_Header*)data);
     data += sizeof(Wlan_Packet_Header);
     size -= sizeof(Wlan_Packet_Header);
-    
+
+    portENTER_CRITICAL_ISR(&s_wlan_incoming_mux);
+    s_wlan_incoming_rssi = rssi;
+    portEXIT_CRITICAL_ISR(&s_wlan_incoming_mux);
+
     if (packet_header.uses_fec)
     {
-      portENTER_CRITICAL_ISR(&s_wlan_incoming_mux);
-      s_wlan_incoming_rssi = rssi;
-      portEXIT_CRITICAL_ISR(&s_wlan_incoming_mux);
-  
       portENTER_CRITICAL_ISR(&s_fec_codec_mux);
       if (!s_fec_codec.decode_data(data, size, true, false))
       {
@@ -381,10 +382,62 @@ IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
     }
     else
     {
-      add_to_wlan_incoming_queue(data, size, rssi, true);
+      add_to_wlan_incoming_queue(data, size, true);
     }
     
     s_stats.wlan_data_received += len;
+}
+
+/////////////////////////////////////////////////////////////////////////
+
+static uint32_t s_adc_vref = 1100;
+static esp_adc_cal_characteristics_t s_adc_characteristics;
+static uint8_t s_adc_enabled = 0;
+static adc_bits_width_t s_adc_width = ADC_WIDTH_BIT_9;
+static uint32_t s_adc_read_duration_ms = 100;
+static uint32_t s_adc_last_read_tp_ms = 0;
+portMUX_TYPE s_adc_data_mux = portMUX_INITIALIZER_UNLOCKED;
+ADC_Data s_adc_data[MAX_ADC];
+
+void read_adc()
+{
+    if (s_adc_enabled == 0)
+    {
+        return;
+    }
+
+    uint32_t now = millis();
+    if (s_adc_last_read_tp_ms + s_adc_read_duration_ms > now)
+    {
+        return;
+    }
+    s_adc_last_read_tp_ms = now;
+
+    portENTER_CRITICAL_ISR(&s_adc_data_mux);
+    ADC_Data data[MAX_ADC] = s_adc_data;
+    portEXIT_CRITICAL_ISR(&s_adc_data_mux);
+    
+    for (size_t i = 0; i < MAX_ADC; i++)
+    {
+        if ((s_adc_enabled & (1 << i)) == 0)
+        {
+            continue;
+        }
+
+        uint32_t voltage = 0;
+        esp_err_t err = esp_adc_cal_get_voltage(adc_channel_t(size_t(ADC_CHANNEL_0) + i), &s_adc_characteristics, &voltage);
+        if (err != ESP_OK)
+        {
+            continue;
+        }
+        
+        data[i].accumulated_data += voltage;
+        data[i].sample_count++;
+    }
+
+    portENTER_CRITICAL_ISR(&s_adc_data_mux);
+    memcpy(s_adc_data, data, sizeof(ADC_Data) * MAX_ADC);
+    portEXIT_CRITICAL_ISR(&s_adc_data_mux);
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -572,11 +625,7 @@ IRAM_ATTR void fec_encoded_cb(void* data, size_t size)
 
 IRAM_ATTR void fec_decoded_cb(void* data, size_t size)
 {
-    portENTER_CRITICAL(&s_wlan_incoming_mux);
-    int16_t rssi = s_wlan_incoming_rssi;
-    portEXIT_CRITICAL(&s_wlan_incoming_mux);
-    
-    add_to_wlan_incoming_queue(data, size, rssi, false);
+    add_to_wlan_incoming_queue(data, size, false);
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -635,7 +684,7 @@ esp_err_t init_spi()
     spi_slave_interface_config_t slave_config;
     slave_config.mode = 0;
     slave_config.spics_io_num = GPIO_CS;
-    slave_config.queue_size = 2;
+    slave_config.queue_size = 3;
     slave_config.flags = 0;
     slave_config.post_setup_cb = spi_post_setup_cb;
     slave_config.post_trans_cb = spi_post_trans_cb;
@@ -651,6 +700,8 @@ IRAM_ATTR void setup_spi_packet_response(size_t transfer_size, uint8_t seq)
 
     ///////////////////////////////////////////////////////
     portENTER_CRITICAL_ISR(&s_wlan_incoming_mux);
+    int16_t rssi = s_wlan_incoming_rssi;
+
     //did the transfer push the last packet out? finish it
     if (s_spi_last_packet.ptr != nullptr && transfer_size >= s_spi_last_packet.size + sizeof(SPI_Res_Packet_Header))
     {
@@ -677,7 +728,7 @@ IRAM_ATTR void setup_spi_packet_response(size_t transfer_size, uint8_t seq)
     if (s_spi_last_packet.ptr)
     {
         //LOG("Yes packet\n");
-        header.rssi = s_spi_last_packet.rssi;
+        header.rssi = rssi;
         header.next_packet_size = s_spi_last_packet.size;
         header.packet_size = s_spi_last_packet.size;
         memcpy(s_spi_tx_buffer + sizeof(header), s_spi_last_packet.ptr, s_spi_last_packet.size);
@@ -742,11 +793,13 @@ IRAM_ATTR size_t get_header_size(const uint8_t* ptr)
     case SPI_Req::PACKET: return sizeof(SPI_Req_Packet_Header);
     case SPI_Req::SETUP_FEC_CODEC: return sizeof(SPI_Req_Setup_Fec_Codec_Header);
     case SPI_Req::SET_RATE: return sizeof(SPI_Req_Set_Rate_Header);
-    case SPI_Req::GET_RATE: return sizeof(SPI_Res_Get_Rate_Header);
+    case SPI_Req::GET_RATE: return sizeof(SPI_Req_Get_Rate_Header);
     case SPI_Req::SET_CHANNEL: return sizeof(SPI_Req_Set_Channel_Header);
-    case SPI_Req::GET_CHANNEL: return sizeof(SPI_Res_Get_Channel_Header);
+    case SPI_Req::GET_CHANNEL: return sizeof(SPI_Req_Get_Channel_Header);
     case SPI_Req::SET_POWER: return sizeof(SPI_Req_Set_Power_Header);
-    case SPI_Req::GET_POWER: return sizeof(SPI_Res_Get_Power_Header);
+    case SPI_Req::GET_POWER: return sizeof(SPI_Req_Get_Power_Header);
+    case SPI_Req::SETUP_ADC: return sizeof(SPI_Req_Setup_ADC_Header);
+    case SPI_Req::GET_ADC: return sizeof(SPI_Req_Get_ADC_Header);
     }  
     return 0;
 }
@@ -992,6 +1045,113 @@ IRAM_ATTR void process_spi_transaction(spi_slave_transaction_t* trans)
         setup_spi_base_response(sizeof(SPI_Res_Get_Power_Header));
         return;
     }
+    if (req == SPI_Req::SETUP_ADC)
+    {
+        LOG("SETUP_ADC\n");
+
+        SPI_Req_Setup_ADC_Header& req_header = *reinterpret_cast<SPI_Req_Setup_ADC_Header*>(s_spi_rx_buffer);
+
+        s_adc_enabled = req_header.adc_enabled;
+        uint32_t rate = req_header.adc_rate;
+        rate = std::min(std::max(rate, 1u), 100u);
+        s_adc_read_duration_ms = 1000 / rate;
+        
+        adc_bits_width_t widths[] = { ADC_WIDTH_BIT_9, ADC_WIDTH_BIT_10, ADC_WIDTH_BIT_11, ADC_WIDTH_BIT_12 };
+        s_adc_width = widths[req_header.adc_width & 0x3];
+        adc1_config_width(s_adc_width);
+        
+        adc_atten_t attens[] = { ADC_ATTEN_DB_0, ADC_ATTEN_DB_2_5, ADC_ATTEN_DB_6, ADC_ATTEN_DB_11 }; 
+        adc_atten_t atten = attens[req_header.adc_attenuation & 0x3];
+        adc1_config_channel_atten(ADC1_CHANNEL_0, atten);
+        adc1_config_channel_atten(ADC1_CHANNEL_1, atten);
+        adc1_config_channel_atten(ADC1_CHANNEL_2, atten);
+        adc1_config_channel_atten(ADC1_CHANNEL_3, atten);
+        adc1_config_channel_atten(ADC1_CHANNEL_4, atten);
+        adc1_config_channel_atten(ADC1_CHANNEL_5, atten);
+        adc1_config_channel_atten(ADC1_CHANNEL_6, atten);
+        adc1_config_channel_atten(ADC1_CHANNEL_7, atten);
+
+        esp_adc_cal_characterize(ADC_UNIT_1, atten, s_adc_width, s_adc_vref, &s_adc_characteristics);
+
+        SPI_Res_Setup_ADC_Header& res_header = *reinterpret_cast<SPI_Res_Setup_ADC_Header*>(s_spi_tx_buffer);
+        res_header.res = static_cast<uint8_t>(SPI_Res::SETUP_ADC);
+        res_header.seq = req_header.seq & 0x7F;
+
+        setup_spi_base_response(sizeof(SPI_Res_Setup_ADC_Header));
+        return;
+    }
+    if (req == SPI_Req::GET_ADC)
+    {
+        LOG("GET_ADC\n");
+
+        SPI_Req_Get_ADC_Header& req_header = *reinterpret_cast<SPI_Req_Get_ADC_Header*>(s_spi_rx_buffer);
+
+        SPI_Res_Get_ADC_Header& res_header = *reinterpret_cast<SPI_Res_Get_ADC_Header*>(s_spi_tx_buffer);
+        res_header.res = static_cast<uint8_t>(SPI_Res::GET_ADC);
+        res_header.seq = req_header.seq & 0x7F;
+
+        portENTER_CRITICAL_ISR(&s_adc_data_mux);
+        {
+            ADC_Data& data = s_adc_data[0];
+            res_header.adc0_sample_count = data.sample_count;
+            res_header.adc0_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        {
+            ADC_Data& data = s_adc_data[1];
+            res_header.adc1_sample_count = data.sample_count;
+            res_header.adc1_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        {
+            ADC_Data& data = s_adc_data[2];
+            res_header.adc2_sample_count = data.sample_count;
+            res_header.adc2_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        {
+            ADC_Data& data = s_adc_data[3];
+            res_header.adc3_sample_count = data.sample_count;
+            res_header.adc3_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        {
+            ADC_Data& data = s_adc_data[4];
+            res_header.adc4_sample_count = data.sample_count;
+            res_header.adc4_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        {
+            ADC_Data& data = s_adc_data[5];
+            res_header.adc5_sample_count = data.sample_count;
+            res_header.adc5_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        {
+            ADC_Data& data = s_adc_data[6];
+            res_header.adc6_sample_count = data.sample_count;
+            res_header.adc6_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        {
+            ADC_Data& data = s_adc_data[7];
+            res_header.adc7_sample_count = data.sample_count;
+            res_header.adc7_average = data.sample_count == 0 ? 0 : data.accumulated_data / data.sample_count;
+            data.sample_count = 0;
+            data.accumulated_data = 0;
+        }
+        portEXIT_CRITICAL_ISR(&s_adc_data_mux);
+
+        setup_spi_base_response(sizeof(SPI_Res_Get_ADC_Header));
+        return;
+    }
     LOG("Unknown req: %d\n", (int)req);
 }
 
@@ -1033,6 +1193,33 @@ void setup()
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    if (!EEPROM.begin(4))
+    {
+        Serial.println("Failed to initialise EEPROM");
+        s_adc_vref = 1100;
+    }
+    else
+    {
+      s_adc_vref = EEPROM.readUInt(0);
+      if (s_adc_vref < 1000 || s_adc_vref > 1200)
+      {
+          Serial.printf("ADC VREF out of bounds: %d. Resetting to 1100.\n", s_adc_vref);
+          s_adc_vref = 1100;
+      }
+      Serial.printf("ADC VREF: %d\n", s_adc_vref);
+    }
+
+    //BLOCK1: measure ADC VREF
+    //ESP_ERROR_CHECK(adc2_vref_to_gpio(GPIO_NUM_25));
+    //printf("VREF routed to ADC2, pin 25\n");
+    //while (true);
+
+    //BLOCK1: write ADC VREF
+    //s_adc_vref = 1085;
+    //EEPROM.writeUInt(0, s_adc_vref);
+    //EEPROM.commit();
+    //while (true);
     
     init_fec();
     initialize_status_led();
@@ -1133,6 +1320,7 @@ IRAM_ATTR void loop()
     */
     
     parse_command();
+    read_adc();
 
     //send pending wlan packets
     if (!s_outgoing_wlan_packet.ptr)
